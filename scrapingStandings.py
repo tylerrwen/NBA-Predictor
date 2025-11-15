@@ -1,51 +1,51 @@
-import requests
-from bs4 import BeautifulSoup
 import pandas as pd
 
-url = "https://www.basketball-reference.com/leagues/NBA_2026_standings.html"
-data = requests.get(url)
-soup = BeautifulSoup(data.text, 'html.parser')
+url = "https://www.basketball-reference.com/leagues/NBA_2025_standings.html"
 
-# Find all tables
-tables = soup.find_all('table')
+def get_team_standing(team_name: str):
+    tables = pd.read_html(url)
 
-# Example: Eastern Conference table
-east_table = tables[0]
+    east = tables[0]
+    west = tables[1]
 
-east_teams = []
-east_links = []
+    east["Conference"] = "East"
+    west["Conference"] = "West"
 
-# Each team is in a <th> tag with a link
-for row in east_table.find_all('tr'):
-    th = row.find('th', {"data-stat": "team_name"})
-    if th and th.a:
-        east_teams.append(th.text)
-        east_links.append("https://www.basketball-reference.com" + th.a['href'])
+    standings = pd.concat([east, west], ignore_index=True)
 
-# Create DataFrame
-east_standings = pd.DataFrame({
-    "Team": east_teams,
-    "Link": east_links
-})
+    # Detect team column
+    possible_cols = ["Team", "Teams", "Eastern Conference", "Western Conference"]
 
-print(east_standings)
+    team_col = None
+    for col in standings.columns:
+        if col in possible_cols:
+            team_col = col
+            break
 
-west_table = tables[1]
+    # fallback to first string column
+    if team_col is None:
+        for col in standings.columns:
+            if standings[col].dtype == object:
+                team_col = col
+                break
 
-west_teams = []
-west_links = []
+    if team_col is None:
+        raise ValueError("Could not find team name column.")
 
-# Each team is in a <th> tag with a link
-for row in west_table.find_all('tr'):
-    th = row.find('th', {"data-stat": "team_name"})
-    if th and th.a:
-        west_teams.append(th.text)
-        west_links.append("https://www.basketball-reference.com" + th.a['href'])
+    col_values = standings[team_col].fillna("").astype(str).str.lower()
 
-# Create DataFrame
-west_standings = pd.DataFrame({
-    "Team": west_teams,
-    "Link": west_links
-})
+    # Search
+    team_name = team_name.lower()
+    mask = col_values.str.contains(team_name, na=False)
 
-print(west_standings)
+    match = standings[mask]
+
+    if match.empty:
+        return f"No team found matching '{team_name}'."
+
+    return match
+
+
+# Example usage:
+result = get_team_standing("Raptors")
+print(result)
