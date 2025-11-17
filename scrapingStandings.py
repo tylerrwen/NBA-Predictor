@@ -47,5 +47,5 @@ def get_team_standing(team_name: str):
 
 
 # Example usage:
-result = get_team_standing("Raptors")
+result = get_team_standing("Magic")
 print(result)
