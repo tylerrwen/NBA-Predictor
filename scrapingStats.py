@@ -1,41 +1,47 @@
 import requests
 from bs4 import BeautifulSoup
-import pandas as pd
 
-url = "https://www.basketball-reference.com/leagues/NBA_2025_standings.html"
-res = requests.get(url)
-soup = BeautifulSoup(res.text, 'html.parser')
+def scrape_team_stats(team, season):
+    url = f"https://www.basketball-reference.com/teams/{team}/{season}/gamelog/"
+    print("Requesting:", url)
 
-# Find all tables (0 = East, 1 = West)
-tables = soup.find_all('table')
+    r = requests.get(url)
+    soup = BeautifulSoup(r.text, "html.parser")
 
-def parse_stats(table):
-    stats_list = []
+    # find main table
+    table = soup.find("table", {"id": "team_game_log_reg"})
+    if table is None:
+        raise Exception("Could not find game log table.")
 
-    # Get headers
-    headers = [th.get_text() for th in table.find('thead').find_all('th')]
-    headers = headers[1:]  # skip 'Rk' column
+    tbody = table.find("tbody")
+    rows = tbody.find_all("tr")
 
-    # Loop through rows
-    for row in table.find('tbody').find_all('tr'):
-        if row.get('class') and 'thead' in row.get('class'):
-            continue  # skip repeated headers
+    games = []
 
-        th = row.find('th', {"data-stat": "team_name"})
-        if th:
-            row_stats = [th.text]  # start with team name
-            row_stats += [td.get_text() for td in row.find_all('td')]
-            stats_list.append(row_stats)
+    for row in rows:
+        if "thead" in row.get("class", []):
+            continue  # skip header rows that appear mid-table
 
-    # Build DataFrame
-    df = pd.DataFrame(stats_list, columns=["Team"] + headers)
-    return df
+        game_data = {}
+        tds = row.find_all("td")
 
-# Parse both conferences
-east_stats = parse_stats(tables[0])
-west_stats = parse_stats(tables[1])
+        for td in tds:
+            stat = td.get("data-stat")
 
-# Combine into a single DataFrame
-all_stats = pd.concat([east_stats, west_stats], ignore_index=True)
-print(east_stats)
+            # numeric stats stored in csk attribute (BEST SOURCE)
+            if td.get("csk") is not None:
+                val = td.get("csk")
+            else:
+                val = td.get_text(strip=True)
+
+            game_data[stat] = val
+
+        # extra: compute home/away
+        location = game_data.get("game_location", "")
+        game_data["home"] = (location != "@")
+
+        games.append(game_data)
+
+    return games
+
 
