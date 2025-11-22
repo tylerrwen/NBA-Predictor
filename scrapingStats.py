@@ -44,4 +44,7 @@ def scrape_team_stats(team, season):
 
     return games
 
+stats = scrape_team_stats("DET", 2026)
+print(len(stats))
+print(stats[:3])
 
