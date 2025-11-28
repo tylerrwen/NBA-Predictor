@@ -1,14 +1,16 @@
 
 
 import time
+import os
+import pickle
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 # import scrapers from your modules (must exist in same folder)
-from scrapingStats import scrape_team_stats
+from scrapingStats import scrapingStats
 from scrapingStandings import get_team_standing
 
 TEAMS_ALL = [
@@ -17,9 +19,24 @@ TEAMS_ALL = [
     "OKC","ORL","PHI","PHX","POR","SAC","SAS","TOR","UTA","WAS"
 ]
 
+# Team name mapping for common abbreviations (scraped data may use different abbreviations)
+TEAM_NAME_MAP = {
+    "PHX": "PHO",  # Phoenix Suns - scraped data uses PHO
+    "BKN": "BRK",  # Brooklyn Nets - scraped data uses BRK
+    "CHA": "CHO",  # Charlotte Hornets - scraped data uses CHO
+}
+
 SEASON = 2026  # change to 2025 if needed
 MIN_SEASON = 2000  # for fallback search
 REQUEST_DELAY = 1.0  # seconds between requests to be polite
+
+# Model persistence paths (saved in NBAPredictor/saved_models folder)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PARENT_DIR = os.path.dirname(SCRIPT_DIR)  # Go up one level to NBAPredictor folder
+MODEL_DIR = os.path.join(PARENT_DIR, "saved_models")
+MODEL_FILE = os.path.join(MODEL_DIR, "nba_predictor_model.pkl")
+DATA_CACHE_FILE = os.path.join(MODEL_DIR, "games_data_cache.pkl")
+TEAMS_CACHE_FILE = os.path.join(MODEL_DIR, "teams_data_cache.pkl")
 
 
 def to_num(x):
@@ -41,15 +58,60 @@ def to_num(x):
             return np.nan
 
 
+def save_model_and_data(model, feature_cols, games_df, teams_df, season):
+    """Save the trained model and data to disk for future use."""
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    
+    model_data = {
+        "model": model,
+        "feature_cols": feature_cols,
+        "season": season
+    }
+    
+    with open(MODEL_FILE, "wb") as f:
+        pickle.dump(model_data, f)
+    
+    with open(DATA_CACHE_FILE, "wb") as f:
+        pickle.dump(games_df, f)
+    
+    with open(TEAMS_CACHE_FILE, "wb") as f:
+        pickle.dump(teams_df, f)
+    
+    print(f"[OK] Model and data saved to {MODEL_DIR}/")
+
+
+def load_model_and_data():
+    """Load saved model and data from disk if they exist. Returns (model, feature_cols, games_df, teams_df, season)."""
+    if not os.path.exists(MODEL_FILE):
+        return None, None, None, None, None
+    
+    try:
+        with open(MODEL_FILE, "rb") as f:
+            model_data = pickle.load(f)
+        
+        with open(DATA_CACHE_FILE, "rb") as f:
+            games_df = pickle.load(f)
+        
+        with open(TEAMS_CACHE_FILE, "rb") as f:
+            teams_df = pickle.load(f)
+        
+        season = model_data.get("season", None)
+        print(f"[OK] Loaded saved model (trained on season {season})")
+        return model_data["model"], model_data["feature_cols"], games_df, teams_df, season
+    except Exception as e:
+        print(f"[WARNING] Error loading saved model: {e}. Will train new model.")
+        return None, None, None, None, None
+
+
 def find_working_season(team, start_season, min_season=MIN_SEASON):
     """
-    Try start_season down to min_season until scrape_team_stats returns non-empty list.
+    Try start_season down to min_season until scrapingStats returns non-empty list.
     Returns the first season that yields gamelogs (or None).
     """
     for s in range(start_season, min_season - 1, -1):
         time.sleep(REQUEST_DELAY)
         try:
-            games = scrape_team_stats(team, s)
+            games = scrapingStats(team, s)
         except Exception:
             games = []
         if games:
@@ -65,24 +127,24 @@ def build_games_dataframe(teams, season):
         # polite delay
         time.sleep(REQUEST_DELAY)
         try:
-            games = scrape_team_stats(team, season)
+            games = scrapingStats(team, season)
         except Exception as e:
-            print(f"  ⚠ Scraper error for {team} {season}: {e}")
+            print(f"Scraper error for {team} {season}: {e}")
             # try to find an earlier season for this team automatically
             fallback = find_working_season(team, season-1)
             if fallback:
                 print(f"    → Found fallback season {fallback} for {team}, scraping that.")
                 time.sleep(REQUEST_DELAY)
                 try:
-                    games = scrape_team_stats(team, fallback)
+                    games = scrapingStats(team, fallback)
                 except Exception as e2:
-                    print(f"    ⚠ fallback scrape failed for {team}: {e2}")
+                    print(f"fallback scrape failed for {team}: {e2}")
                     games = []
             else:
                 games = []
 
         if not games:
-            print(f"  ⚠ No game log found for {team} {season}. Skipping.")
+            print(f"No game log found for {team} {season}. Skipping.")
             continue
 
         for g in games:
@@ -105,16 +167,61 @@ def build_games_dataframe(teams, season):
             team_upper = team.upper()
             opp_upper = opp.upper() if isinstance(opp, str) else opp
 
+            # Extract additional stats
             if home_flag:
                 home_team = team_upper
                 away_team = opp_upper
                 home_points = to_num(team_pts)
                 away_points = to_num(opp_pts)
+                # Team stats (home team)
+                home_fg_pct = to_num(g.get("fg_pct"))
+                home_fg3_pct = to_num(g.get("fg3_pct"))
+                home_ft_pct = to_num(g.get("ft_pct"))
+                home_trb = to_num(g.get("trb"))
+                home_ast = to_num(g.get("ast"))
+                home_stl = to_num(g.get("stl"))
+                home_blk = to_num(g.get("blk"))
+                home_tov = to_num(g.get("tov"))
+                home_orb = to_num(g.get("orb"))
+                home_drb = to_num(g.get("drb"))
+                # Opponent stats (away team)
+                away_fg_pct = to_num(g.get("opp_fg_pct"))
+                away_fg3_pct = to_num(g.get("opp_fg3_pct"))
+                away_ft_pct = to_num(g.get("opp_ft_pct"))
+                away_trb = to_num(g.get("opp_trb"))
+                away_ast = to_num(g.get("opp_ast"))
+                away_stl = to_num(g.get("opp_stl"))
+                away_blk = to_num(g.get("opp_blk"))
+                away_tov = to_num(g.get("opp_tov"))
+                away_orb = to_num(g.get("opp_orb"))
+                away_drb = to_num(g.get("opp_drb"))
             else:
                 home_team = opp_upper
                 away_team = team_upper
                 home_points = to_num(opp_pts)
                 away_points = to_num(team_pts)
+                # Opponent stats (home team)
+                home_fg_pct = to_num(g.get("opp_fg_pct"))
+                home_fg3_pct = to_num(g.get("opp_fg3_pct"))
+                home_ft_pct = to_num(g.get("opp_ft_pct"))
+                home_trb = to_num(g.get("opp_trb"))
+                home_ast = to_num(g.get("opp_ast"))
+                home_stl = to_num(g.get("opp_stl"))
+                home_blk = to_num(g.get("opp_blk"))
+                home_tov = to_num(g.get("opp_tov"))
+                home_orb = to_num(g.get("opp_orb"))
+                home_drb = to_num(g.get("opp_drb"))
+                # Team stats (away team)
+                away_fg_pct = to_num(g.get("fg_pct"))
+                away_fg3_pct = to_num(g.get("fg3_pct"))
+                away_ft_pct = to_num(g.get("ft_pct"))
+                away_trb = to_num(g.get("trb"))
+                away_ast = to_num(g.get("ast"))
+                away_stl = to_num(g.get("stl"))
+                away_blk = to_num(g.get("blk"))
+                away_tov = to_num(g.get("tov"))
+                away_orb = to_num(g.get("orb"))
+                away_drb = to_num(g.get("drb"))
 
             if np.isnan(home_points) or np.isnan(away_points):
                 continue
@@ -129,7 +236,27 @@ def build_games_dataframe(teams, season):
                 "home_team": home_team,
                 "away_team": away_team,
                 "home_pts": home_points,
-                "away_pts": away_points
+                "away_pts": away_points,
+                "home_fg_pct": home_fg_pct,
+                "home_fg3_pct": home_fg3_pct,
+                "home_ft_pct": home_ft_pct,
+                "home_trb": home_trb,
+                "home_ast": home_ast,
+                "home_stl": home_stl,
+                "home_blk": home_blk,
+                "home_tov": home_tov,
+                "home_orb": home_orb,
+                "home_drb": home_drb,
+                "away_fg_pct": away_fg_pct,
+                "away_fg3_pct": away_fg3_pct,
+                "away_ft_pct": away_ft_pct,
+                "away_trb": away_trb,
+                "away_ast": away_ast,
+                "away_stl": away_stl,
+                "away_blk": away_blk,
+                "away_tov": away_tov,
+                "away_orb": away_orb,
+                "away_drb": away_drb
             })
 
     if not all_games:
@@ -150,25 +277,92 @@ def compute_team_aggregates(games_df):
     if games_df.empty:
         return pd.DataFrame()
 
+    # Aggregate home game stats
     home = games_df.groupby("home_team").agg(
         home_games=("home_pts","count"),
         home_pts_total=("home_pts","sum"),
         home_pts_avg=("home_pts","mean"),
-        home_opp_pts_avg=("away_pts","mean")
+        home_opp_pts_avg=("away_pts","mean"),
+        home_fg_pct_avg=("home_fg_pct","mean"),
+        home_fg3_pct_avg=("home_fg3_pct","mean"),
+        home_ft_pct_avg=("home_ft_pct","mean"),
+        home_trb_avg=("home_trb","mean"),
+        home_ast_avg=("home_ast","mean"),
+        home_stl_avg=("home_stl","mean"),
+        home_blk_avg=("home_blk","mean"),
+        home_tov_avg=("home_tov","mean"),
+        home_orb_avg=("home_orb","mean"),
+        home_drb_avg=("home_drb","mean"),
+        # Opponent stats when team is home
+        home_opp_fg_pct_avg=("away_fg_pct","mean"),
+        home_opp_fg3_pct_avg=("away_fg3_pct","mean"),
+        home_opp_ft_pct_avg=("away_ft_pct","mean"),
+        home_opp_trb_avg=("away_trb","mean"),
+        home_opp_ast_avg=("away_ast","mean"),
+        home_opp_stl_avg=("away_stl","mean"),
+        home_opp_blk_avg=("away_blk","mean"),
+        home_opp_tov_avg=("away_tov","mean")
     ).rename_axis("team").reset_index()
 
+    # Aggregate away game stats
     away = games_df.groupby("away_team").agg(
         away_games=("away_pts","count"),
         away_pts_total=("away_pts","sum"),
         away_pts_avg=("away_pts","mean"),
-        away_opp_pts_avg=("home_pts","mean")
+        away_opp_pts_avg=("home_pts","mean"),
+        away_fg_pct_avg=("away_fg_pct","mean"),
+        away_fg3_pct_avg=("away_fg3_pct","mean"),
+        away_ft_pct_avg=("away_ft_pct","mean"),
+        away_trb_avg=("away_trb","mean"),
+        away_ast_avg=("away_ast","mean"),
+        away_stl_avg=("away_stl","mean"),
+        away_blk_avg=("away_blk","mean"),
+        away_tov_avg=("away_tov","mean"),
+        away_orb_avg=("away_orb","mean"),
+        away_drb_avg=("away_drb","mean"),
+        # Opponent stats when team is away
+        away_opp_fg_pct_avg=("home_fg_pct","mean"),
+        away_opp_fg3_pct_avg=("home_fg3_pct","mean"),
+        away_opp_ft_pct_avg=("home_ft_pct","mean"),
+        away_opp_trb_avg=("home_trb","mean"),
+        away_opp_ast_avg=("home_ast","mean"),
+        away_opp_stl_avg=("home_stl","mean"),
+        away_opp_blk_avg=("home_blk","mean"),
+        away_opp_tov_avg=("home_tov","mean")
     ).rename_axis("team").reset_index()
 
     teams = pd.merge(home, away, how="outer", on="team").fillna(0)
     teams["games_played"] = teams["home_games"] + teams["away_games"]
+    
+    # Weighted averages for overall team stats
     teams["pts_for_avg"] = (teams["home_pts_total"] + teams["away_pts_total"]) / teams["games_played"].replace(0, np.nan)
     teams["pts_against_avg"] = ((teams["home_opp_pts_avg"] * teams["home_games"]) + (teams["away_opp_pts_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
     teams["pt_diff"] = teams["pts_for_avg"] - teams["pts_against_avg"]
+    
+    # Weighted averages for shooting percentages
+    teams["fg_pct_avg"] = ((teams["home_fg_pct_avg"] * teams["home_games"]) + (teams["away_fg_pct_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    teams["fg3_pct_avg"] = ((teams["home_fg3_pct_avg"] * teams["home_games"]) + (teams["away_fg3_pct_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    teams["ft_pct_avg"] = ((teams["home_ft_pct_avg"] * teams["home_games"]) + (teams["away_ft_pct_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    
+    # Weighted averages for other stats
+    teams["trb_avg"] = ((teams["home_trb_avg"] * teams["home_games"]) + (teams["away_trb_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    teams["ast_avg"] = ((teams["home_ast_avg"] * teams["home_games"]) + (teams["away_ast_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    teams["stl_avg"] = ((teams["home_stl_avg"] * teams["home_games"]) + (teams["away_stl_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    teams["blk_avg"] = ((teams["home_blk_avg"] * teams["home_games"]) + (teams["away_blk_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    teams["tov_avg"] = ((teams["home_tov_avg"] * teams["home_games"]) + (teams["away_tov_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    teams["orb_avg"] = ((teams["home_orb_avg"] * teams["home_games"]) + (teams["away_orb_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    teams["drb_avg"] = ((teams["home_drb_avg"] * teams["home_games"]) + (teams["away_drb_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    
+    # Opponent stats (defensive metrics)
+    teams["opp_fg_pct_avg"] = ((teams["home_opp_fg_pct_avg"] * teams["home_games"]) + (teams["away_opp_fg_pct_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    teams["opp_fg3_pct_avg"] = ((teams["home_opp_fg3_pct_avg"] * teams["home_games"]) + (teams["away_opp_fg3_pct_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    teams["opp_ft_pct_avg"] = ((teams["home_opp_ft_pct_avg"] * teams["home_games"]) + (teams["away_opp_ft_pct_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    teams["opp_trb_avg"] = ((teams["home_opp_trb_avg"] * teams["home_games"]) + (teams["away_opp_trb_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    teams["opp_ast_avg"] = ((teams["home_opp_ast_avg"] * teams["home_games"]) + (teams["away_opp_ast_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    teams["opp_stl_avg"] = ((teams["home_opp_stl_avg"] * teams["home_games"]) + (teams["away_opp_stl_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    teams["opp_blk_avg"] = ((teams["home_opp_blk_avg"] * teams["home_games"]) + (teams["away_opp_blk_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    teams["opp_tov_avg"] = ((teams["home_opp_tov_avg"] * teams["home_games"]) + (teams["away_opp_tov_avg"] * teams["away_games"])) / teams["games_played"].replace(0, np.nan)
+    
     teams = teams.fillna(0).set_index("team")
     return teams
 
@@ -184,12 +378,56 @@ def build_feature_matrix_and_train(games_df, teams_df):
         hstats = teams_df.loc[h]
         astats = teams_df.loc[a]
         feat = {
+            # Basic scoring stats
             "home_pts_for_avg": hstats["pts_for_avg"],
             "home_pts_against_avg": hstats["pts_against_avg"],
             "home_pt_diff": hstats["pt_diff"],
             "away_pts_for_avg": astats["pts_for_avg"],
             "away_pts_against_avg": astats["pts_against_avg"],
             "away_pt_diff": astats["pt_diff"],
+            # Shooting percentages
+            "home_fg_pct": hstats["fg_pct_avg"],
+            "home_fg3_pct": hstats["fg3_pct_avg"],
+            "home_ft_pct": hstats["ft_pct_avg"],
+            "away_fg_pct": astats["fg_pct_avg"],
+            "away_fg3_pct": astats["fg3_pct_avg"],
+            "away_ft_pct": astats["ft_pct_avg"],
+            # Rebounding
+            "home_trb": hstats["trb_avg"],
+            "home_orb": hstats["orb_avg"],
+            "home_drb": hstats["drb_avg"],
+            "away_trb": astats["trb_avg"],
+            "away_orb": astats["orb_avg"],
+            "away_drb": astats["drb_avg"],
+            # Playmaking and defense
+            "home_ast": hstats["ast_avg"],
+            "home_stl": hstats["stl_avg"],
+            "home_blk": hstats["blk_avg"],
+            "home_tov": hstats["tov_avg"],
+            "away_ast": astats["ast_avg"],
+            "away_stl": astats["stl_avg"],
+            "away_blk": astats["blk_avg"],
+            "away_tov": astats["tov_avg"],
+            # Defensive metrics (opponent stats)
+            "home_opp_fg_pct": hstats["opp_fg_pct_avg"],
+            "home_opp_fg3_pct": hstats["opp_fg3_pct_avg"],
+            "home_opp_ast": hstats["opp_ast_avg"],
+            "home_opp_tov": hstats["opp_tov_avg"],
+            "away_opp_fg_pct": astats["opp_fg_pct_avg"],
+            "away_opp_fg3_pct": astats["opp_fg3_pct_avg"],
+            "away_opp_ast": astats["opp_ast_avg"],
+            "away_opp_tov": astats["opp_tov_avg"],
+            # Relative/differential features (often more predictive)
+            "pt_diff_diff": hstats["pt_diff"] - astats["pt_diff"],
+            "fg_pct_diff": hstats["fg_pct_avg"] - astats["fg_pct_avg"],
+            "fg3_pct_diff": hstats["fg3_pct_avg"] - astats["fg3_pct_avg"],
+            "trb_diff": hstats["trb_avg"] - astats["trb_avg"],
+            "ast_diff": hstats["ast_avg"] - astats["ast_avg"],
+            "stl_diff": hstats["stl_avg"] - astats["stl_avg"],
+            "blk_diff": hstats["blk_avg"] - astats["blk_avg"],
+            "tov_diff": astats["tov_avg"] - hstats["tov_avg"],  # Negative is good (fewer TOs)
+            "opp_fg_pct_diff": astats["opp_fg_pct_avg"] - hstats["opp_fg_pct_avg"],  # Lower opp FG% is better
+            # Home court advantage
             "home_flag": 1
         }
         rows.append(feat)
@@ -200,14 +438,53 @@ def build_feature_matrix_and_train(games_df, teams_df):
 
     X = pd.DataFrame(rows).fillna(0)
     y = pd.Series(labels)
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, random_state=42)
-    model = RandomForestClassifier(n_estimators=200, random_state=42)
+    
+    # Try stratified split, but fall back to regular split if it fails (e.g., too few samples)
+    try:
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, random_state=42, stratify=y)
+    except ValueError:
+        # If stratification fails (e.g., not enough samples in each class), use regular split
+        print("[WARNING] Stratified split failed, using regular split...")
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, random_state=42)
+    
+    # Improved Random Forest with better hyperparameters
+    model = RandomForestClassifier(
+        n_estimators=300,           # More trees for better accuracy
+        max_depth=15,               # Prevent overfitting
+        min_samples_split=10,       # More samples required to split
+        min_samples_leaf=5,         # More samples in leaf nodes
+        max_features='sqrt',        # Use sqrt of features (good default)
+        class_weight='balanced',    # Handle class imbalance
+        random_state=42,
+        n_jobs=-1                   # Use all CPU cores
+    )
+    
+    print(f"Training model with {len(X_train)} training samples...")
     model.fit(X_train, y_train)
+    
+    # Evaluate model
+    train_preds = model.predict(X_train)
+    train_acc = accuracy_score(y_train, train_preds)
     preds = model.predict(X_test)
-    acc = accuracy_score(y_test, preds)
-    print(f"Model trained — test accuracy: {acc:.3f} ({len(X_train)} train, {len(X_test)} test)")
+    test_acc = accuracy_score(y_test, preds)
+    
+    print(f"\n{'='*60}")
+    print(f"Model Performance:")
+    print(f"{'='*60}")
+    print(f"Training accuracy: {train_acc:.3f} ({len(X_train)} samples)")
+    print(f"Test accuracy:     {test_acc:.3f} ({len(X_test)} samples)")
+    print(f"\nFeature importance (top 10):")
+    feature_importance = pd.DataFrame({
+        'feature': X.columns,
+        'importance': model.feature_importances_
+    }).sort_values('importance', ascending=False)
+    for idx, row in feature_importance.head(10).iterrows():
+        print(f"  {row['feature']:30s}: {row['importance']:.4f}")
+    print(f"{'='*60}\n")
+    
     return model, X.columns.tolist()
 
+#
 
 def display_prediction_report(home_team, away_team, home_prob, away_prob, winner, home_stats, away_stats):
     print("\n" + "="*60)
@@ -215,21 +492,35 @@ def display_prediction_report(home_team, away_team, home_prob, away_prob, winner
     print("="*60 + "\n")
     print(f"Matchup: {home_team} (Home)  vs  {away_team} (Away)\n")
     print("-"*60)
-    print(f"🏆  Predicted Winner: {winner}")
+    print(f"*** Predicted Winner: {winner} ***")
     print("-"*60 + "\n")
-    print("📈 Win Probabilities:")
+    print("Win Probabilities:")
     print(f"  • {home_team}: {home_prob*100:.2f}%")
     print(f"  • {away_team}: {away_prob*100:.2f}%\n")
     print("-"*60)
-    print("📊 Team Season Averages\n")
+    print("Team Season Averages:\n")
     print(f"{home_team}:")
-    print(f"  • Points Scored:      {home_stats['pts_for_avg']:.1f}")
-    print(f"  • Points Allowed:     {home_stats['pts_against_avg']:.1f}")
-    print(f"  • Point Differential: {home_stats['pt_diff']:+.1f}\n")
+    print(f"  • Points Scored:      {home_stats.get('pts_for_avg', 0):.1f}")
+    print(f"  • Points Allowed:     {home_stats.get('pts_against_avg', 0):.1f}")
+    print(f"  • Point Differential: {home_stats.get('pt_diff', 0):+.1f}")
+    print(f"  • FG%:               {home_stats.get('fg_pct_avg', 0):.3f}")
+    print(f"  • 3PT%:              {home_stats.get('fg3_pct_avg', 0):.3f}")
+    print(f"  • Rebounds:          {home_stats.get('trb_avg', 0):.1f}")
+    print(f"  • Assists:           {home_stats.get('ast_avg', 0):.1f}")
+    print(f"  • Steals:            {home_stats.get('stl_avg', 0):.1f}")
+    print(f"  • Blocks:            {home_stats.get('blk_avg', 0):.1f}")
+    print(f"  • Turnovers:         {home_stats.get('tov_avg', 0):.1f}\n")
     print(f"{away_team}:")
-    print(f"  • Points Scored:      {away_stats['pts_for_avg']:.1f}")
-    print(f"  • Points Allowed:     {away_stats['pts_against_avg']:.1f}")
-    print(f"  • Point Differential: {away_stats['pt_diff']:+.1f}")
+    print(f"  • Points Scored:      {away_stats.get('pts_for_avg', 0):.1f}")
+    print(f"  • Points Allowed:     {away_stats.get('pts_against_avg', 0):.1f}")
+    print(f"  • Point Differential: {away_stats.get('pt_diff', 0):+.1f}")
+    print(f"  • FG%:               {away_stats.get('fg_pct_avg', 0):.3f}")
+    print(f"  • 3PT%:              {away_stats.get('fg3_pct_avg', 0):.3f}")
+    print(f"  • Rebounds:          {away_stats.get('trb_avg', 0):.1f}")
+    print(f"  • Assists:           {away_stats.get('ast_avg', 0):.1f}")
+    print(f"  • Steals:            {away_stats.get('stl_avg', 0):.1f}")
+    print(f"  • Blocks:            {away_stats.get('blk_avg', 0):.1f}")
+    print(f"  • Turnovers:         {away_stats.get('tov_avg', 0):.1f}")
     print("\n" + "="*60 + "\n")
 
 
@@ -237,21 +528,86 @@ def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team):
     teamA = teamA.upper(); teamB = teamB.upper(); home_team = home_team.upper()
     if home_team not in (teamA, teamB):
         raise ValueError("home_team must be either teamA or teamB")
-    home = home_team
-    away = teamB if home == teamA else teamA
-    if home not in teams_df.index or away not in teams_df.index:
-        raise ValueError("One or both teams missing aggregate stats.")
+    
+    # Map team names to match scraped data abbreviations
+    teamA_mapped = TEAM_NAME_MAP.get(teamA, teamA)
+    teamB_mapped = TEAM_NAME_MAP.get(teamB, teamB)
+    home_team_mapped = TEAM_NAME_MAP.get(home_team, home_team)
+    
+    home = home_team_mapped
+    away = teamB_mapped if home == teamA_mapped else teamA_mapped
+    
+    # Check which teams are missing and provide helpful error message
+    missing_teams = []
+    if home not in teams_df.index:
+        missing_teams.append(f"{home_team} (mapped to {home})")
+    if away not in teams_df.index:
+        original_away = teamB if home == teamA_mapped else teamA
+        missing_teams.append(f"{original_away} (mapped to {away})")
+    
+    if missing_teams:
+        available = list(teams_df.index)
+        raise ValueError(
+            f"Teams missing aggregate stats: {', '.join(missing_teams)}. "
+            f"Available teams: {', '.join(sorted(available))}"
+        )
     h = teams_df.loc[home]; a = teams_df.loc[away]
     feat = {
+        # Basic scoring stats
         "home_pts_for_avg": h["pts_for_avg"],
         "home_pts_against_avg": h["pts_against_avg"],
         "home_pt_diff": h["pt_diff"],
         "away_pts_for_avg": a["pts_for_avg"],
         "away_pts_against_avg": a["pts_against_avg"],
         "away_pt_diff": a["pt_diff"],
+        # Shooting percentages
+        "home_fg_pct": h["fg_pct_avg"],
+        "home_fg3_pct": h["fg3_pct_avg"],
+        "home_ft_pct": h["ft_pct_avg"],
+        "away_fg_pct": a["fg_pct_avg"],
+        "away_fg3_pct": a["fg3_pct_avg"],
+        "away_ft_pct": a["ft_pct_avg"],
+        # Rebounding
+        "home_trb": h["trb_avg"],
+        "home_orb": h["orb_avg"],
+        "home_drb": h["drb_avg"],
+        "away_trb": a["trb_avg"],
+        "away_orb": a["orb_avg"],
+        "away_drb": a["drb_avg"],
+        # Playmaking and defense
+        "home_ast": h["ast_avg"],
+        "home_stl": h["stl_avg"],
+        "home_blk": h["blk_avg"],
+        "home_tov": h["tov_avg"],
+        "away_ast": a["ast_avg"],
+        "away_stl": a["stl_avg"],
+        "away_blk": a["blk_avg"],
+        "away_tov": a["tov_avg"],
+        # Defensive metrics (opponent stats)
+        "home_opp_fg_pct": h["opp_fg_pct_avg"],
+        "home_opp_fg3_pct": h["opp_fg3_pct_avg"],
+        "home_opp_ast": h["opp_ast_avg"],
+        "home_opp_tov": h["opp_tov_avg"],
+        "away_opp_fg_pct": a["opp_fg_pct_avg"],
+        "away_opp_fg3_pct": a["opp_fg3_pct_avg"],
+        "away_opp_ast": a["opp_ast_avg"],
+        "away_opp_tov": a["opp_tov_avg"],
+        # Relative/differential features (often more predictive)
+        "pt_diff_diff": h["pt_diff"] - a["pt_diff"],
+        "fg_pct_diff": h["fg_pct_avg"] - a["fg_pct_avg"],
+        "fg3_pct_diff": h["fg3_pct_avg"] - a["fg3_pct_avg"],
+        "trb_diff": h["trb_avg"] - a["trb_avg"],
+        "ast_diff": h["ast_avg"] - a["ast_avg"],
+        "stl_diff": h["stl_avg"] - a["stl_avg"],
+        "blk_diff": h["blk_avg"] - a["blk_avg"],
+        "tov_diff": a["tov_avg"] - h["tov_avg"],  # Negative is good (fewer TOs)
+        "opp_fg_pct_diff": a["opp_fg_pct_avg"] - h["opp_fg_pct_avg"],  # Lower opp FG% is better
+        # Home court advantage
         "home_flag": 1
     }
-    X_row = pd.DataFrame([feat])[feature_cols].fillna(0)
+    # Ensure all required features are present (handle old models with fewer features)
+    feat_dict = {col: feat.get(col, 0) for col in feature_cols}
+    X_row = pd.DataFrame([feat_dict])[feature_cols].fillna(0)
     prob_home = model.predict_proba(X_row)[0][1]
     prob_away = 1 - prob_home
     predicted = home if prob_home >= 0.5 else away
@@ -259,21 +615,52 @@ def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team):
     return {"home_team": home, "away_team": away, "home_win_prob": round(prob_home,3), "away_win_prob": round(prob_away,3), "predicted_winner": predicted}
 
 
-def main(teams=TEAMS_ALL, season=SEASON):
+def main(teams=TEAMS_ALL, season=SEASON, force_retrain=False):
+    # Use all teams by default for more training data
+    if teams is None:
+        teams = TEAMS_ALL
+        print(f"Using all {len(teams)} teams for maximum training data")
     print("Starting NBA Predictor pipeline...")
-    games_df = build_games_dataframe(teams, season)
-    if games_df.empty:
-        print("No games were scraped for any team. Exiting.")
-        return
-    print(f"Scraped {len(games_df)} unique games from season {season}.")
-    teams_df = compute_team_aggregates(games_df)
-    print("\nTeam aggregates (sample):")
-    print(teams_df.head())
-    model, feature_cols = build_feature_matrix_and_train(games_df, teams_df)
+    
+    # Try to load saved model and data
+    model = None
+    feature_cols = None
+    games_df = None
+    teams_df = None
+    
+    if not force_retrain:
+        model, feature_cols, games_df, teams_df, saved_season = load_model_and_data()
+        if model is not None:
+            # Check if saved model is for the same season
+            if saved_season != season:
+                print(f"[WARNING] Saved model is for season {saved_season}, but requested season is {season}.")
+                print("   Retraining with new season data...")
+                model = None  # Force retrain
+    
+    # If no saved model or force_retrain, scrape and train
+    if model is None or force_retrain:
+        print("Scraping game data and training new model...")
+        games_df = build_games_dataframe(teams, season)
+        if games_df.empty:
+            print("No games were scraped for any team. Exiting.")
+            return
+        print(f"Scraped {len(games_df)} unique games from season {season}.")
+        teams_df = compute_team_aggregates(games_df)
+        print("\nTeam aggregates (sample):")
+        print(teams_df.head())
+        model, feature_cols = build_feature_matrix_and_train(games_df, teams_df)
+        
+        # Save the newly trained model
+        save_model_and_data(model, feature_cols, games_df, teams_df, season)
+    else:
+        print(f"Using cached data: {len(games_df)} games, {len(teams_df)} teams")
+        print("\nTeam aggregates (sample):")
+        print(teams_df.head())
+    
     # Example prediction: take first two teams with aggregates
     available = list(teams_df.index)
     if len(available) >= 2:
-        a = available[0]; b = available[1]; home = a
+        a = "SAC"; b = "TOR"; home = a
         print("\nExample prediction:")
         predict_winner(model, feature_cols, teams_df, a, b, home)
     else:

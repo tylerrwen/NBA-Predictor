@@ -1,7 +1,7 @@
 import requests
 from bs4 import BeautifulSoup
 
-def scrape_team_stats(team, season):
+def scrapingStats(team, season):
     url = f"https://www.basketball-reference.com/teams/{team}/{season}/gamelog/"
     print("Requesting:", url)
 
@@ -43,8 +43,3 @@ def scrape_team_stats(team, season):
         games.append(game_data)
 
     return games
-
-stats = scrape_team_stats("DET", 2026)
-print(len(stats))
-print(stats[:3])
-
