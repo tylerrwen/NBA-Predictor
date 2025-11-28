@@ -6,8 +6,16 @@ import pickle
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+
+# Try to import XGBoost for better accuracy
+try:
+    import xgboost as xgb
+    USE_XGBOOST = True
+except ImportError:
+    USE_XGBOOST = False
+    print("[INFO] XGBoost not installed. Using Random Forest. Install with: pip install xgboost")
 
 # import scrapers from your modules (must exist in same folder)
 from scrapingStats import scrapingStats
@@ -29,6 +37,8 @@ TEAM_NAME_MAP = {
 SEASON = 2026  # change to 2025 if needed
 MIN_SEASON = 2000  # for fallback search
 REQUEST_DELAY = 1.0  # seconds between requests to be polite
+NUM_SEASONS = 1  # Number of seasons to use for training (current + previous seasons)
+RECENT_FORM_WINDOW = 5  # Number of recent games to use for form calculation
 
 # Model persistence paths (saved in NBAPredictor/saved_models folder)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -65,7 +75,10 @@ def save_model_and_data(model, feature_cols, games_df, teams_df, season):
     model_data = {
         "model": model,
         "feature_cols": feature_cols,
-        "season": season
+        "season": season,
+        "model_version": 2,  # Version 2 includes recent form features
+        "num_seasons": NUM_SEASONS,
+        "recent_form_window": RECENT_FORM_WINDOW
     }
     
     with open(MODEL_FILE, "wb") as f:
@@ -130,18 +143,7 @@ def build_games_dataframe(teams, season):
             games = scrapingStats(team, season)
         except Exception as e:
             print(f"Scraper error for {team} {season}: {e}")
-            # try to find an earlier season for this team automatically
-            fallback = find_working_season(team, season-1)
-            if fallback:
-                print(f"    → Found fallback season {fallback} for {team}, scraping that.")
-                time.sleep(REQUEST_DELAY)
-                try:
-                    games = scrapingStats(team, fallback)
-                except Exception as e2:
-                    print(f"fallback scrape failed for {team}: {e2}")
-                    games = []
-            else:
-                games = []
+            games = []
 
         if not games:
             print(f"No game log found for {team} {season}. Skipping.")
@@ -273,6 +275,54 @@ def build_games_dataframe(teams, season):
     return df
 
 
+def build_multi_season_dataframe(teams, start_season, num_seasons=NUM_SEASONS):
+    """Build dataframe from single season using scrapingStats.py directly."""
+    # Just use the current season - scrapingStats.py works for all teams
+    print(f"Scraping season {start_season} for {len(teams)} teams...")
+    games_df = build_games_dataframe(teams, start_season)
+    if not games_df.empty:
+        games_df['season'] = start_season
+    return games_df
+
+
+def compute_recent_form(games_df, team, game_date, window=RECENT_FORM_WINDOW):
+    """Compute recent form stats for a team up to a specific date."""
+    # Get all games for this team before the current game
+    team_games = games_df[
+        ((games_df['home_team'] == team) | (games_df['away_team'] == team)) &
+        (games_df['date'] < game_date)
+    ].sort_values('date').tail(window)
+    
+    if len(team_games) < window:
+        # Not enough games, return None (will use season averages)
+        return None
+    
+    wins = 0
+    pt_diff_sum = 0
+    pts_for_sum = 0
+    pts_against_sum = 0
+    
+    for _, game in team_games.iterrows():
+        if game['home_team'] == team:
+            wins += game['home_win']
+            pt_diff = game['home_pts'] - game['away_pts']
+            pts_for_sum += game['home_pts']
+            pts_against_sum += game['away_pts']
+        else:
+            wins += (1 - game['home_win'])
+            pt_diff = game['away_pts'] - game['home_pts']
+            pts_for_sum += game['away_pts']
+            pts_against_sum += game['home_pts']
+        pt_diff_sum += pt_diff
+    
+    return {
+        'recent_win_pct': wins / window,
+        'recent_pt_diff': pt_diff_sum / window,
+        'recent_pts_for': pts_for_sum / window,
+        'recent_pts_against': pts_against_sum / window
+    }
+
+
 def compute_team_aggregates(games_df):
     if games_df.empty:
         return pd.DataFrame()
@@ -373,10 +423,20 @@ def build_feature_matrix_and_train(games_df, teams_df):
     for _, r in games_df.iterrows():
         h = r["home_team"]
         a = r["away_team"]
+        game_date = r.get("date")
+        
         if h not in teams_df.index or a not in teams_df.index:
             continue
         hstats = teams_df.loc[h]
         astats = teams_df.loc[a]
+        
+        # Get recent form if date is available
+        home_recent = None
+        away_recent = None
+        if game_date is not None and pd.notna(game_date):
+            home_recent = compute_recent_form(games_df, h, game_date, RECENT_FORM_WINDOW)
+            away_recent = compute_recent_form(games_df, a, game_date, RECENT_FORM_WINDOW)
+        
         feat = {
             # Basic scoring stats
             "home_pts_for_avg": hstats["pts_for_avg"],
@@ -427,6 +487,12 @@ def build_feature_matrix_and_train(games_df, teams_df):
             "blk_diff": hstats["blk_avg"] - astats["blk_avg"],
             "tov_diff": astats["tov_avg"] - hstats["tov_avg"],  # Negative is good (fewer TOs)
             "opp_fg_pct_diff": astats["opp_fg_pct_avg"] - hstats["opp_fg_pct_avg"],  # Lower opp FG% is better
+            # Recent form features (if available)
+            "home_recent_win_pct": home_recent["recent_win_pct"] if home_recent else 0.5,
+            "home_recent_pt_diff": home_recent["recent_pt_diff"] if home_recent else hstats["pt_diff"],
+            "away_recent_win_pct": away_recent["recent_win_pct"] if away_recent else 0.5,
+            "away_recent_pt_diff": away_recent["recent_pt_diff"] if away_recent else astats["pt_diff"],
+            "recent_form_diff": (home_recent["recent_win_pct"] if home_recent else 0.5) - (away_recent["recent_win_pct"] if away_recent else 0.5),
             # Home court advantage
             "home_flag": 1
         }
@@ -447,17 +513,33 @@ def build_feature_matrix_and_train(games_df, teams_df):
         print("[WARNING] Stratified split failed, using regular split...")
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, random_state=42)
     
-    # Improved Random Forest with better hyperparameters
-    model = RandomForestClassifier(
-        n_estimators=300,           # More trees for better accuracy
-        max_depth=15,               # Prevent overfitting
-        min_samples_split=10,       # More samples required to split
-        min_samples_leaf=5,         # More samples in leaf nodes
-        max_features='sqrt',        # Use sqrt of features (good default)
-        class_weight='balanced',    # Handle class imbalance
-        random_state=42,
-        n_jobs=-1                   # Use all CPU cores
-    )
+    # Use XGBoost if available, otherwise fall back to Random Forest
+    if USE_XGBOOST:
+        print("Using XGBoost model (better accuracy)...")
+        model = xgb.XGBClassifier(
+            n_estimators=300,
+            max_depth=6,
+            learning_rate=0.1,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            min_child_weight=3,
+            gamma=0.1,
+            random_state=42,
+            n_jobs=-1,
+            eval_metric='logloss'
+        )
+    else:
+        print("Using Random Forest model...")
+        model = RandomForestClassifier(
+            n_estimators=300,           # More trees for better accuracy
+            max_depth=15,               # Prevent overfitting
+            min_samples_split=10,       # More samples required to split
+            min_samples_leaf=5,         # More samples in leaf nodes
+            max_features='sqrt',        # Use sqrt of features (good default)
+            class_weight='balanced',    # Handle class imbalance
+            random_state=42,
+            n_jobs=-1                   # Use all CPU cores
+        )
     
     print(f"Training model with {len(X_train)} training samples...")
     model.fit(X_train, y_train)
@@ -468,11 +550,16 @@ def build_feature_matrix_and_train(games_df, teams_df):
     preds = model.predict(X_test)
     test_acc = accuracy_score(y_test, preds)
     
+    # Cross-validation for more robust accuracy estimate
+    print("\nRunning cross-validation...")
+    cv_scores = cross_val_score(model, X, y, cv=5, scoring='accuracy', n_jobs=-1)
+    
     print(f"\n{'='*60}")
     print(f"Model Performance:")
     print(f"{'='*60}")
     print(f"Training accuracy: {train_acc:.3f} ({len(X_train)} samples)")
     print(f"Test accuracy:     {test_acc:.3f} ({len(X_test)} samples)")
+    print(f"CV accuracy:       {cv_scores.mean():.3f} (+/- {cv_scores.std() * 2:.3f})")
     print(f"\nFeature importance (top 10):")
     feature_importance = pd.DataFrame({
         'feature': X.columns,
@@ -524,7 +611,7 @@ def display_prediction_report(home_team, away_team, home_prob, away_prob, winner
     print("\n" + "="*60 + "\n")
 
 
-def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team):
+def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team, games_df=None):
     teamA = teamA.upper(); teamB = teamB.upper(); home_team = home_team.upper()
     if home_team not in (teamA, teamB):
         raise ValueError("home_team must be either teamA or teamB")
@@ -552,6 +639,18 @@ def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team):
             f"Available teams: {', '.join(sorted(available))}"
         )
     h = teams_df.loc[home]; a = teams_df.loc[away]
+    
+    # Get recent form if games_df is available
+    home_recent = None
+    away_recent = None
+    if games_df is not None and not games_df.empty:
+        # Use most recent date in games_df as prediction date
+        if 'date' in games_df.columns:
+            prediction_date = games_df['date'].max()
+            if pd.notna(prediction_date):
+                home_recent = compute_recent_form(games_df, home, prediction_date, RECENT_FORM_WINDOW)
+                away_recent = compute_recent_form(games_df, away, prediction_date, RECENT_FORM_WINDOW)
+    
     feat = {
         # Basic scoring stats
         "home_pts_for_avg": h["pts_for_avg"],
@@ -602,6 +701,12 @@ def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team):
         "blk_diff": h["blk_avg"] - a["blk_avg"],
         "tov_diff": a["tov_avg"] - h["tov_avg"],  # Negative is good (fewer TOs)
         "opp_fg_pct_diff": a["opp_fg_pct_avg"] - h["opp_fg_pct_avg"],  # Lower opp FG% is better
+        # Recent form features (if available)
+        "home_recent_win_pct": home_recent["recent_win_pct"] if home_recent else 0.5,
+        "home_recent_pt_diff": home_recent["recent_pt_diff"] if home_recent else h["pt_diff"],
+        "away_recent_win_pct": away_recent["recent_win_pct"] if away_recent else 0.5,
+        "away_recent_pt_diff": away_recent["recent_pt_diff"] if away_recent else a["pt_diff"],
+        "recent_form_diff": (home_recent["recent_win_pct"] if home_recent else 0.5) - (away_recent["recent_win_pct"] if away_recent else 0.5),
         # Home court advantage
         "home_flag": 1
     }
@@ -615,7 +720,7 @@ def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team):
     return {"home_team": home, "away_team": away, "home_win_prob": round(prob_home,3), "away_win_prob": round(prob_away,3), "predicted_winner": predicted}
 
 
-def main(teams=TEAMS_ALL, season=SEASON, force_retrain=False):
+def main(teams=None, season=SEASON, force_retrain=False):
     # Use all teams by default for more training data
     if teams is None:
         teams = TEAMS_ALL
@@ -631,15 +736,36 @@ def main(teams=TEAMS_ALL, season=SEASON, force_retrain=False):
     if not force_retrain:
         model, feature_cols, games_df, teams_df, saved_season = load_model_and_data()
         if model is not None:
-            # Check if saved model is for the same season
-            if saved_season != season:
-                print(f"[WARNING] Saved model is for season {saved_season}, but requested season is {season}.")
-                print("   Retraining with new season data...")
-                model = None  # Force retrain
+            # Check model version and compatibility
+            try:
+                with open(MODEL_FILE, "rb") as f:
+                    model_data = pickle.load(f)
+                model_version = model_data.get("model_version", 1)  # Old models are version 1
+                saved_num_seasons = model_data.get("num_seasons", 1)
+                
+                # Check if model needs retraining
+                needs_retrain = False
+                if saved_season != season:
+                    print(f"[WARNING] Saved model is for season {saved_season}, but requested season is {season}.")
+                    needs_retrain = True
+                elif model_version < 2:
+                    print(f"[WARNING] Saved model is old version ({model_version}). New version includes recent form features.")
+                    needs_retrain = True
+                elif saved_num_seasons != NUM_SEASONS:
+                    print(f"[WARNING] Saved model used {saved_num_seasons} seasons, but current setting is {NUM_SEASONS}.")
+                    needs_retrain = True
+                
+                if needs_retrain:
+                    print("   Retraining with new settings...")
+                    model = None  # Force retrain
+            except Exception as e:
+                print(f"[WARNING] Could not check model version: {e}")
+                model = None  # Force retrain to be safe
     
     # If no saved model or force_retrain, scrape and train
     if model is None or force_retrain:
         print("Scraping game data and training new model...")
+        print(f"Scraping season {season} for {len(teams)} teams using scrapingStats.py...")
         games_df = build_games_dataframe(teams, season)
         if games_df.empty:
             print("No games were scraped for any team. Exiting.")
@@ -662,7 +788,7 @@ def main(teams=TEAMS_ALL, season=SEASON, force_retrain=False):
     if len(available) >= 2:
         a = "SAC"; b = "TOR"; home = a
         print("\nExample prediction:")
-        predict_winner(model, feature_cols, teams_df, a, b, home)
+        predict_winner(model, feature_cols, teams_df, a, b, home, games_df)
     else:
         print("Not enough teams with aggregates to produce an example prediction.")
     return {"games_df": games_df, "teams_df": teams_df, "model": model, "feature_cols": feature_cols}
