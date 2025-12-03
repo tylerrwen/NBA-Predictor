@@ -42,17 +42,20 @@
         <h1>NBA Game Predictor</h1>
 
         <form method="POST">
+            {% if error %}
+                <p style="color:red;"><strong>{{ error }}</strong></p>
+            {% endif %}
             <label>Select Home Team</label>
             <select name="home">
                 {% for t in teams %}
-                    <option value="{{ t }}">{{ t }}</option>
+                    <option value="{{ t }}" {% if t == selected_home %}selected{% endif %}>{{ t }}</option>
                 {% endfor %}
             </select>
 
             <label>Select Away Team</label>
             <select name="away">
                 {% for t in teams %}
-                    <option value="{{ t }}">{{ t }}</option>
+                    <option value="{{ t }}" {% if t == selected_away %}selected{% endif %}>{{ t }}</option>
                 {% endfor %}
             </select>
 

@@ -18,24 +18,34 @@ def index():
     result = None
     injuries_home = []
     injuries_away = []
+    selected_home = None
+    selected_away = None
+    error = None
 
     if request.method == "POST":
-        home = request.form["home"]
-        away = request.form["away"]
+        home = request.form.get("home")
+        away = request.form.get("away")
+        selected_home = home
+        selected_away = away
 
-        # Run prediction
-        result = predict_matchup(home, away)
-
-        # Scrape injuries
-        injuries_home = scrape_injuries(home, SEASON)
-        injuries_away = scrape_injuries(away, SEASON)
+        if not home or not away:
+            error = "Both teams must be selected."
+        elif home == away:
+            error = "Teams must be different."
+        else:
+            result = predict_matchup(home, away)
+            injuries_home = scrape_injuries(home, SEASON)
+            injuries_away = scrape_injuries(away, SEASON)
 
     return render_template(
         "index.html",
         teams=TEAMS,
         result=result,
         injuries_home=injuries_home,
-        injuries_away=injuries_away
+        injuries_away=injuries_away,
+        selected_home=selected_home,
+        selected_away=selected_away,
+        error=error
     )
 
 if __name__ == "__main__":
