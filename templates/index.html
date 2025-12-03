@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>NBA Predictor</title>
+    <style>
+        body { font-family: Arial; background: #f3f3f3; padding: 30px; }
+        .card {
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            width: 450px;
+            margin: auto;
+            box-shadow: 0 0 10px rgba(0,0,0,0.15);
+        }
+        h1 { text-align: center; }
+        select, button {
+            width: 100%;
+            padding: 12px;
+            margin-top: 10px;
+            border-radius: 6px;
+            border: 1px solid #ccc;
+        }
+        button {
+            background: #0066ff;
+            color: white;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        button:hover { background: #004bcc; }
+
+        .injury-list {
+            background: #fff6f6;
+            border-left: 4px solid #d90000;
+            padding: 10px;
+            margin-top: 10px;
+            border-radius: 6px;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>NBA Game Predictor</h1>
+
+        <form method="POST">
+            <label>Select Home Team</label>
+            <select name="home">
+                {% for t in teams %}
+                    <option value="{{ t }}">{{ t }}</option>
+                {% endfor %}
+            </select>
+
+            <label>Select Away Team</label>
+            <select name="away">
+                {% for t in teams %}
+                    <option value="{{ t }}">{{ t }}</option>
+                {% endfor %}
+            </select>
+
+            <button type="submit">Predict</button>
+        </form>
+
+        {% if result %}
+            <h2 style="margin-top:20px;">Prediction Result</h2>
+            <p><strong>Winner:</strong> {{ result["winner"] }}</p>
+            <p><strong>Confidence:</strong> {{ result["confidence"] }}%</p>
+
+            <h3>Home Team Injuries ({{ result["home"] }})</h3>
+            {% if injuries_home %}
+                <div class="injury-list">
+                    {% for inj in injuries_home %}
+                        <p><strong>{{ inj.player }}</strong> — {{ inj.description }} ({{ inj.update }})</p>
+                    {% endfor %}
+                </div>
+            {% else %}
+                <p>No recorded injuries</p>
+            {% endif %}
+
+            <h3>Away Team Injuries ({{ result["away"] }})</h3>
+            {% if injuries_away %}
+                <div class="injury-list">
+                    {% for inj in injuries_away %}
+                        <p><strong>{{ inj.player }}</strong> — {{ inj.description }} ({{ inj.update }})</p>
+                    {% endfor %}
+                </div>
+            {% else %}
+                <p>No recorded injuries</p>
+            {% endif %}
+        {% endif %}
+    </div>
+</body>
+</html>

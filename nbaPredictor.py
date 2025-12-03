@@ -22,9 +22,9 @@ from scrapingStats import scrapingStats
 from scrapingStandings import get_team_standing
 
 TEAMS_ALL = [
-    "ATL","BOS","BKN","CHA","CHI","CLE","DAL","DEN","DET","GSW",
+    "ATL","BOS","BRK","CHO","CHI","CLE","DAL","DEN","DET","GSW",
     "HOU","IND","LAC","LAL","MEM","MIA","MIL","MIN","NOP","NYK",
-    "OKC","ORL","PHI","PHX","POR","SAC","SAS","TOR","UTA","WAS"
+    "OKC","ORL","PHI","PHO","POR","SAC","SAS","TOR","UTA","WAS"
 ]
 
 # Team name mapping for common abbreviations (scraped data may use different abbreviations)
@@ -114,6 +114,59 @@ def load_model_and_data():
     except Exception as e:
         print(f"[WARNING] Error loading saved model: {e}. Will train new model.")
         return None, None, None, None, None
+
+
+def load_existing_games_data():
+    """Load existing games data from cache if it exists. Returns games_df or None."""
+    if not os.path.exists(DATA_CACHE_FILE):
+        return None
+    
+    try:
+        with open(DATA_CACHE_FILE, "rb") as f:
+            games_df = pickle.load(f)
+        print(f"[OK] Loaded {len(games_df)} existing games from cache")
+        return games_df
+    except Exception as e:
+        print(f"[WARNING] Error loading cached games data: {e}")
+        return None
+
+
+def merge_games_data(existing_df, new_df):
+    """
+    Merge new games with existing games, avoiding duplicates.
+    Returns the combined dataframe with duplicates removed.
+    """
+    if existing_df is None or existing_df.empty:
+        return new_df.copy() if new_df is not None and not new_df.empty else pd.DataFrame()
+    
+    if new_df is None or new_df.empty:
+        return existing_df.copy()
+    
+    # Ensure date column is datetime for both
+    for df in [existing_df, new_df]:
+        if 'date' in df.columns:
+            try:
+                df['date'] = pd.to_datetime(df['date'])
+            except:
+                pass
+    
+    # Combine the dataframes
+    combined = pd.concat([existing_df, new_df], ignore_index=True)
+    
+    # Remove duplicates based on date, home_team, and away_team
+    # Keep the most recent entry if there are duplicates
+    combined = combined.sort_values('date', ascending=False).drop_duplicates(
+        subset=['date', 'home_team', 'away_team'],
+        keep='first'
+    ).sort_values('date', ascending=True).reset_index(drop=True)
+    
+    new_games_count = len(combined) - len(existing_df)
+    if new_games_count > 0:
+        print(f"[INFO] Added {new_games_count} new games to existing dataset")
+    else:
+        print(f"[INFO] No new games found (all games already in dataset)")
+    
+    return combined
 
 
 def find_working_season(team, start_season, min_season=MIN_SEASON):
@@ -732,9 +785,13 @@ def main(teams=None, season=SEASON, force_retrain=False):
     feature_cols = None
     games_df = None
     teams_df = None
+    existing_games_df = None
     
     if not force_retrain:
         model, feature_cols, games_df, teams_df, saved_season = load_model_and_data()
+        if games_df is not None and not games_df.empty:
+            existing_games_df = games_df.copy()
+        
         if model is not None:
             # Check model version and compatibility
             try:
@@ -762,31 +819,55 @@ def main(teams=None, season=SEASON, force_retrain=False):
                 print(f"[WARNING] Could not check model version: {e}")
                 model = None  # Force retrain to be safe
     
-    # If no saved model or force_retrain, scrape and train
-    if model is None or force_retrain:
-        print("Scraping game data and training new model...")
-        print(f"Scraping season {season} for {len(teams)} teams using scrapingStats.py...")
-        games_df = build_games_dataframe(teams, season)
-        if games_df.empty:
-            print("No games were scraped for any team. Exiting.")
+    # Always scrape new data to check for new games (incremental learning)
+    print(f"Scraping season {season} for {len(teams)} teams using scrapingStats.py...")
+    new_games_df = build_games_dataframe(teams, season)
+    
+    if new_games_df.empty:
+        if existing_games_df is not None and not existing_games_df.empty:
+            print("No new games scraped. Using existing cached model and data.")
+            games_df = existing_games_df
+            if model is None:
+                print("[WARNING] No model available and no new games scraped. Cannot proceed.")
+                return
+        else:
+            print("No games were scraped for any team and no cached data exists. Exiting.")
             return
-        print(f"Scraped {len(games_df)} unique games from season {season}.")
-        teams_df = compute_team_aggregates(games_df)
-        print("\nTeam aggregates (sample):")
-        print(teams_df.head())
-        model, feature_cols = build_feature_matrix_and_train(games_df, teams_df)
-        
-        # Save the newly trained model
-        save_model_and_data(model, feature_cols, games_df, teams_df, season)
     else:
-        print(f"Using cached data: {len(games_df)} games, {len(teams_df)} teams")
-        print("\nTeam aggregates (sample):")
-        print(teams_df.head())
+        print(f"Scraped {len(new_games_df)} unique games from season {season}.")
+        
+        # Merge new games with existing games (incremental learning)
+        games_df = merge_games_data(existing_games_df, new_games_df)
+        
+        # Check if we have new games or need to retrain
+        has_new_games = existing_games_df is None or len(games_df) > len(existing_games_df)
+        needs_retrain = model is None or force_retrain or has_new_games
+        
+        if has_new_games and model is not None:
+            print(f"[INFO] Found new games! Retraining model with accumulated data ({len(games_df)} total games)...")
+        
+        if needs_retrain:
+            print("Computing team aggregates from all available games...")
+            teams_df = compute_team_aggregates(games_df)
+            print("\nTeam aggregates (sample):")
+            print(teams_df.head())
+            print(f"\nTraining model on {len(games_df)} total games (accumulated from all runs)...")
+            model, feature_cols = build_feature_matrix_and_train(games_df, teams_df)
+            
+            # Save the newly trained model with accumulated data
+            save_model_and_data(model, feature_cols, games_df, teams_df, season)
+        else:
+            # Use existing model but update teams_df with latest aggregates
+            print(f"Using cached model. Updating team aggregates with latest data...")
+            teams_df = compute_team_aggregates(games_df)
+            print(f"Using cached model: {len(games_df)} games, {len(teams_df)} teams")
+            print("\nTeam aggregates (sample):")
+            print(teams_df.head())
     
     # Example prediction: take first two teams with aggregates
     available = list(teams_df.index)
     if len(available) >= 2:
-        a = "SAC"; b = "TOR"; home = a
+        a = "GSW"; b = "OKC"; home = a
         print("\nExample prediction:")
         predict_winner(model, feature_cols, teams_df, a, b, home, games_df)
     else:
