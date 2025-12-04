@@ -1,75 +1,67 @@
 import requests
-from bs4 import BeautifulSoup
-import time
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;"
-        "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
-    ),
-    "Referer": "https://www.google.com/",
-    "DNT": "1",
-    "Connection": "keep-alive",
-}
-
-def safe_request(url, retries=3):
-    for attempt in range(retries):
-        r = requests.get(url, headers=HEADERS)
-        if r.status_code == 200:
-            return r
-        if r.status_code == 429:
-            wait = 2 + attempt  # increasing delay: 2, 3, 4...
-            print(f"Rate limited (429). Retrying in {wait} sec...")
-            time.sleep(wait)
-        else:
-            return r
-    return r
+from bs4 import BeautifulSoup, Comment
 
 def scrape_injuries(team: str, season: int):
     url = f"https://www.basketball-reference.com/teams/{team}/{season}.html"
     print("Requesting injury report:", url)
 
-    r = safe_request(url)
+    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
     if r.status_code != 200:
-        print("Page could not be loaded. Status:", r.status_code)
+        print("Page could not be loaded:", r.status_code)
         return []
 
     soup = BeautifulSoup(r.text, "html.parser")
 
-    injury_div = soup.find("div", {"id": "all_injuries"})
-    if injury_div is None:
-        print("No injury section found.")
+    # --- 1. Try to find injury table normally ---
+    table = soup.find("table", id="injuries")
+
+    # --- 2. If not found, search inside HTML comments ---
+    if table is None:
+        comments = soup.find_all(string=lambda text: isinstance(text, Comment))
+
+        for c in comments:
+            if "id=\"injuries\"" in c:
+                comment_soup = BeautifulSoup(c, "html.parser")
+                table = comment_soup.find("table", id="injuries")
+                if table:
+                    break
+
+    # --- 3. If STILL no table -> no injuries listed ---
+    if table is None:
+        print(f"No injuries table found for {team} — probably no injuries.")
         return []
 
-    table = injury_div.find("table", {"id": "injuries"})
-    if table is None:
-        print("Injury table not found.")
+    tbody = table.find("tbody")
+    if not tbody:
         return []
 
     injuries = []
-    rows = table.find("tbody").find_all("tr")
 
-    for row in rows:
-        tds = row.find_all("td")
-        if len(tds) < 4:
+    for row in tbody.find_all("tr"):
+        th = row.find("th", {"data-stat": "player"})
+        if not th:
             continue
 
+        player = th.get_text(strip=True)
+
+        team_name = row.find("td", {"data-stat": "team_name"})
+        update = row.find("td", {"data-stat": "date_update"})
+        note = row.find("td", {"data-stat": "note"})
+
         injuries.append({
-            "player": tds[0].get_text(strip=True),
-            "update": tds[2].get_text(strip=True),
-            "description": tds[3].get_text(strip=True)
+            "player": player,
+            "team": team_name.get_text(strip=True) if team_name else "",
+            "update": update.get_text(strip=True) if update else "",
+            "description": note.get_text(strip=True) if note else ""
         })
 
     return injuries
 
 
-# Test
+
+# Test the scraper
 if __name__ == "__main__":
     data = scrape_injuries("OKC", 2026)
-    print("Injuries found:", data)
+    print("Injuries:")
+    for inj in data:
+        print(inj)

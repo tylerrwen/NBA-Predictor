@@ -626,7 +626,7 @@ def build_feature_matrix_and_train(games_df, teams_df):
 
 #
 
-def display_prediction_report(home_team, away_team, home_prob, away_prob, winner, home_stats, away_stats):
+def display_prediction_report(home_team, away_team, home_prob, away_prob, winner, home_stats, away_stats, injury_note_home=None, injury_note_away=None):
     print("\n" + "="*60)
     print("                 NBA GAME PREDICTION REPORT")
     print("="*60 + "\n")
@@ -637,6 +637,25 @@ def display_prediction_report(home_team, away_team, home_prob, away_prob, winner
     print("Win Probabilities:")
     print(f"  • {home_team}: {home_prob*100:.2f}%")
     print(f"  • {away_team}: {away_prob*100:.2f}%\n")
+    print("-"*60)
+    if injury_note_home or injury_note_away:
+        print("Injury Adjustment:")
+        if injury_note_home:
+            print(f"  {home_team} injuries: {', '.join(injury_note_home)}")
+        if injury_note_away:
+            print(f"  {away_team} injuries: {', '.join(injury_note_away)}")
+        print("-"*60)
+    # Notable injuries section
+    notable_home = [note for note in (injury_note_home or []) if '(level 3' in note]
+    notable_away = [note for note in (injury_note_away or []) if '(level 3' in note]
+    print("Notable Injuries:")
+    if (notable_home or notable_away):
+        if notable_home:
+            print(f"  {home_team}: {', '.join(notable_home)}")
+        if notable_away:
+            print(f"  {away_team}: {', '.join(notable_away)}")
+    else:
+        print("  None.")
     print("-"*60)
     print("Team Season Averages:\n")
     print(f"{home_team}:")
@@ -664,19 +683,21 @@ def display_prediction_report(home_team, away_team, home_prob, away_prob, winner
     print("\n" + "="*60 + "\n")
 
 
-def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team, games_df=None):
+def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team, games_df=None, injuries_home=None, injuries_away=None):
+    """
+    Optionally accepts injuries_home and injuries_away (list of dicts with 'player', 'description').
+    Auto-assigns importance: 3 if 'starter', 'star', 'all-star' in description, else 1.
+    Each 'importance' point reduces team win prob by 0.02.
+    """
     teamA = teamA.upper(); teamB = teamB.upper(); home_team = home_team.upper()
     if home_team not in (teamA, teamB):
         raise ValueError("home_team must be either teamA or teamB")
-    
     # Map team names to match scraped data abbreviations
     teamA_mapped = TEAM_NAME_MAP.get(teamA, teamA)
     teamB_mapped = TEAM_NAME_MAP.get(teamB, teamB)
     home_team_mapped = TEAM_NAME_MAP.get(home_team, home_team)
-    
     home = home_team_mapped
     away = teamB_mapped if home == teamA_mapped else teamA_mapped
-    
     # Check which teams are missing and provide helpful error message
     missing_teams = []
     if home not in teams_df.index:
@@ -684,15 +705,12 @@ def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team, games
     if away not in teams_df.index:
         original_away = teamB if home == teamA_mapped else teamA
         missing_teams.append(f"{original_away} (mapped to {away})")
-    
     if missing_teams:
         available = list(teams_df.index)
         raise ValueError(
             f"Teams missing aggregate stats: {', '.join(missing_teams)}. "
-            f"Available teams: {', '.join(sorted(available))}"
-        )
+            f"Available teams: {', '.join(sorted(available))}")
     h = teams_df.loc[home]; a = teams_df.loc[away]
-    
     # Get recent form if games_df is available
     home_recent = None
     away_recent = None
@@ -703,7 +721,6 @@ def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team, games
             if pd.notna(prediction_date):
                 home_recent = compute_recent_form(games_df, home, prediction_date, RECENT_FORM_WINDOW)
                 away_recent = compute_recent_form(games_df, away, prediction_date, RECENT_FORM_WINDOW)
-    
     feat = {
         # Basic scoring stats
         "home_pts_for_avg": h["pts_for_avg"],
@@ -768,9 +785,32 @@ def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team, games
     X_row = pd.DataFrame([feat_dict])[feature_cols].fillna(0)
     prob_home = model.predict_proba(X_row)[0][1]
     prob_away = 1 - prob_home
-    predicted = home if prob_home >= 0.5 else away
-    display_prediction_report(home, away, prob_home, prob_away, predicted, dict(h), dict(a))
-    return {"home_team": home, "away_team": away, "home_win_prob": round(prob_home,3), "away_win_prob": round(prob_away,3), "predicted_winner": predicted}
+    # --- Injury adjustment logic ---
+    total_importance_home = 0
+    total_importance_away = 0
+    injury_note_home = []
+    injury_note_away = []
+    if injuries_home:
+        for inj in injuries_home:
+            desc = (inj.get("description") or "").lower()
+            importance = 3 if any(word in desc for word in ["star", "starter", "all-star"]) else 1
+            total_importance_home += importance
+            injury_note_home.append(f"{inj.get('player', '')} (level {importance})")
+    if injuries_away:
+        for inj in injuries_away:
+            desc = (inj.get("description") or "").lower()
+            importance = 3 if any(word in desc for word in ["star", "starter", "all-star"]) else 1
+            total_importance_away += importance
+            injury_note_away.append(f"{inj.get('player', '')} (level {importance})")
+    # Each importance point = 2% (0.02) win prob, capped to [0,1].
+    adjustment = 0.02
+    prob_home_adj = prob_home - (total_importance_home * adjustment) + (total_importance_away * adjustment)
+    prob_home_adj = max(0.0, min(1.0, prob_home_adj))
+    prob_away_adj = 1 - prob_home_adj
+    predicted = home if prob_home_adj >= 0.5 else away
+    display_prediction_report(home, away, prob_home_adj, prob_away_adj, predicted, dict(h), dict(a), injury_note_home, injury_note_away)
+    return {"home_team": home, "away_team": away, "home_win_prob": round(prob_home_adj,3), "away_win_prob": round(prob_away_adj,3), "predicted_winner": predicted,
+            "injuries_home": injury_note_home, "injuries_away": injury_note_away, "adjustment_detail": { "raw_model_prob_home": round(prob_home,3), "raw_model_prob_away": round(prob_away,3), "inj_importance_home": total_importance_home, "inj_importance_away": total_importance_away, "adj_delta_percent": (total_importance_away - total_importance_home)*adjustment*100 }}
 
 
 def main(teams=None, season=SEASON, force_retrain=False):
