@@ -81,19 +81,12 @@
                     {% endif %}
                 </p>
             {% endif %}
-            <h3>Notable Home Injuries (level ≥ 3)</h3>
-            {% if notable_home and notable_home|length %}
-            <ul> {% for inj in notable_home %}<li>{{ inj }}</li>{% endfor %} </ul>
-            {% else %}<span>None</span>{% endif %}
-            <h3>Notable Away Injuries (level ≥ 3)</h3>
-            {% if notable_away and notable_away|length %}
-            <ul> {% for inj in notable_away %}<li>{{ inj }}</li>{% endfor %} </ul>
-            {% else %}<span>None</span>{% endif %}
             <h3>All Home Team Injuries ({{ result.home }})</h3>
             {% if injuries_home and injuries_home|length %}
                 <div class="injury-list">
                     {% for inj in injuries_home %}
-                        <p><strong>{{ inj.player }}</strong> — {{ inj.description }} ({{ inj.update }})</p>
+                        <p><strong>{{ inj["player"] }}</strong> — {{ inj["description"] }} ({{ inj["update"] }}
+                            )</p>
                     {% endfor %}
                 </div>
             {% else %}
@@ -103,7 +96,7 @@
             {% if injuries_away and injuries_away|length %}
                 <div class="injury-list">
                     {% for inj in injuries_away %}
-                        <p><strong>{{ inj.player }}</strong> — {{ inj.description }} ({{ inj.update }})</p>
+                        <p><strong>{{ inj["player"] }}</strong> — {{ inj["description"] }} ({{ inj["update"] }})</p>
                     {% endfor %}
                 </div>
             {% else %}
