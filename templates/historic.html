@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Historic NBA Matchup</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #f7f9fc;
+            margin: 0;
+            padding: 0;
+            color: #1e293b;
+        }
+        .page {
+            max-width: 900px;
+            margin: 40px auto;
+            background: #fff;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(15,23,42,0.08);
+            padding: 32px;
+        }
+        h1 {
+            text-align: center;
+            margin-bottom: 24px;
+        }
+        form {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-bottom: 24px;
+        }
+        .card {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            padding: 16px;
+        }
+        label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 6px;
+        }
+        select, button {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            font-size: 14px;
+            background: #fff;
+        }
+        button {
+            background: #0ea5e9;
+            color: #fff;
+            border: none;
+            font-weight: 700;
+            cursor: pointer;
+            transition: background 0.2s ease;
+        }
+        button:hover {
+            background: #0284c7;
+        }
+        .result {
+            background: #ecfeff;
+            border: 1px solid #bae6fd;
+            border-radius: 10px;
+            padding: 16px;
+        }
+        .error {
+            background: #fef2f2;
+            border: 1px solid #fecdd3;
+            color: #b91c1c;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div class="page">
+        <h1>Historic NBA Matchup Predictor</h1>
+        <p style="text-align:center; margin-top:8px;">
+            <a href="/" style="color:#0ea5e9; text-decoration:none; font-weight:600;">Back to Regular Predictor</a>
+        </p>
+
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+
+        <form method="POST">
+            <div class="card">
+                <label>Team A</label>
+                <select name="team_a">
+                    {% for t in teams %}
+                        <option value="{{ t }}" {% if selected_a == t %}selected{% endif %}>{{ t }}</option>
+                    {% endfor %}
+                </select>
+                <label style="margin-top:10px;">Season</label>
+                <select name="season_a">
+                    {% for s in seasons %}
+                        <option value="{{ s.value }}" {% if season_a == s.value %}selected{% endif %}>{{ s.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="card">
+                <label>Team B</label>
+                <select name="team_b">
+                    {% for t in teams %}
+                        <option value="{{ t }}" {% if selected_b == t %}selected{% endif %}>{{ t }}</option>
+                    {% endfor %}
+                </select>
+                <label style="margin-top:10px;">Season</label>
+                <select name="season_b">
+                    {% for s in seasons %}
+                        <option value="{{ s.value }}" {% if season_b == s.value %}selected{% endif %}>{{ s.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="card" style="align-self:end;">
+                <button type="submit">Predict</button>
+            </div>
+        </form>
+
+        {% if result %}
+        <div class="result">
+            <h3>Result</h3>
+            <p><strong>Winner:</strong> {{ result.winner }}</p>
+            <p>{{ result.team_a }} ({{ result.season_a }}): {{ result.prob_a }}%</p>
+            <p>{{ result.team_b }} ({{ result.season_b }}): {{ result.prob_b }}%</p>
+        </div>
+        {% endif %}
+    </div>
+</body>
+</html>
