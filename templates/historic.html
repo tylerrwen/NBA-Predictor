@@ -77,9 +77,9 @@
 </head>
 <body>
     <div class="page">
-        <h1>Historic NBA Matchup Predictor</h1>
+        <h1 style="color:#0f172a;">Historic NBA Matchup Predictor</h1>
         <p style="text-align:center; margin-top:8px;">
-            <a href="/" style="color:#0ea5e9; text-decoration:none; font-weight:600;">Back to Regular Predictor</a>
+            <a href="/" style="color:#0284c7; text-decoration:none; font-weight:600;">Back to Regular Predictor</a>
         </p>
 
         {% if error %}
@@ -91,7 +91,7 @@
                 <label>Team A</label>
                 <select name="team_a">
                     {% for t in teams %}
-                        <option value="{{ t }}" {% if selected_a == t %}selected{% endif %}>{{ t }}</option>
+                        <option value="{{ t.abbr }}" {% if selected_a == t.abbr %}selected{% endif %}>{{ t.name }}</option>
                     {% endfor %}
                 </select>
                 <label style="margin-top:10px;">Season</label>
@@ -106,7 +106,7 @@
                 <label>Team B</label>
                 <select name="team_b">
                     {% for t in teams %}
-                        <option value="{{ t }}" {% if selected_b == t %}selected{% endif %}>{{ t }}</option>
+                        <option value="{{ t.abbr }}" {% if selected_b == t.abbr %}selected{% endif %}>{{ t.name }}</option>
                     {% endfor %}
                 </select>
                 <label style="margin-top:10px;">Season</label>

@@ -6,11 +6,12 @@
         body { font-family: Arial; background: #f3f3f3; padding: 30px; }
         .card {
             background: white;
-            padding: 20px;
-            border-radius: 10px;
-            width: 450px;
+            padding: 24px;
+            border-radius: 12px;
+            width: 700px; /* widened table/card */
+            max-width: 90vw;
             margin: auto;
-            box-shadow: 0 0 10px rgba(0,0,0,0.15);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
         }
         h1 { text-align: center; }
         select, button {
@@ -19,6 +20,7 @@
             margin-top: 10px;
             border-radius: 6px;
             border: 1px solid #ccc;
+            font-size: 16px; /* larger team text */
         }
         button {
             background: #0066ff;
@@ -51,14 +53,14 @@
             <label>Select Home Team</label>
             <select name="home">
                 {% for t in teams %}
-                    <option value="{{ t }}" {% if t == selected_home %}selected{% endif %}>{{ t }}</option>
+                    <option value="{{ t.abbr }}" {% if t.abbr == selected_home %}selected{% endif %}>{{ t.name }}</option>
                 {% endfor %}
             </select>
 
             <label>Select Away Team</label>
             <select name="away">
                 {% for t in teams %}
-                    <option value="{{ t }}" {% if t == selected_away %}selected{% endif %}>{{ t }}</option>
+                    <option value="{{ t.abbr }}" {% if t.abbr == selected_away %}selected{% endif %}>{{ t.name }}</option>
                 {% endfor %}
             </select>
 
@@ -88,7 +90,7 @@
             {% if injuries_home and injuries_home|length %}
                 <div class="injury-list">
                     {% for inj in injuries_home %}
-                        <p><strong>{{ inj.player }}</strong> — {{ inj.description }} ({{ inj.update }})</p>
+                        <p><strong>{{ inj.player }}</strong> — {{ inj.description }} ({{ inj["update"] }})</p>
                     {% endfor %}
                 </div>
             {% else %}
@@ -98,7 +100,7 @@
             {% if injuries_away and injuries_away|length %}
                 <div class="injury-list">
                     {% for inj in injuries_away %}
-                        <p><strong>{{ inj.player }}</strong> — {{ inj.description }} ({{ inj.update }})</p>
+                        <p><strong>{{ inj.player }}</strong> — {{ inj.description }} ({{ inj["update"] }})</p>
                     {% endfor %}
                 </div>
             {% else %}

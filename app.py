@@ -1,5 +1,5 @@
 from flask import Flask, render_template, request
-from nbaPredictor import load_model_and_data, predict_winner
+from nbaPredictor import load_model_and_data, predict_winner, main as train_season_model
 from scrapingRoster import scrape_injuries
 
 app = Flask(__name__)
@@ -11,10 +11,67 @@ TEAMS = [
     "POR", "SAC", "SAS", "TOR", "UTA", "WAS"
 ]
 
+TEAM_NAME_MAP = {
+    "ATL": "Atlanta Hawks",
+    "BOS": "Boston Celtics",
+    "BKN": "Brooklyn Nets",
+    "CHA": "Charlotte Hornets",
+    "CHI": "Chicago Bulls",
+    "CLE": "Cleveland Cavaliers",
+    "DAL": "Dallas Mavericks",
+    "DEN": "Denver Nuggets",
+    "DET": "Detroit Pistons",
+    "GSW": "Golden State Warriors",
+    "HOU": "Houston Rockets",
+    "IND": "Indiana Pacers",
+    "LAC": "Los Angeles Clippers",
+    "LAL": "Los Angeles Lakers",
+    "MEM": "Memphis Grizzlies",
+    "MIA": "Miami Heat",
+    "MIL": "Milwaukee Bucks",
+    "MIN": "Minnesota Timberwolves",
+    "NOP": "New Orleans Pelicans",
+    "NYK": "New York Knicks",
+    "OKC": "Oklahoma City Thunder",
+    "ORL": "Orlando Magic",
+    "PHI": "Philadelphia 76ers",
+    "PHX": "Phoenix Suns",
+    "POR": "Portland Trail Blazers",
+    "SAC": "Sacramento Kings",
+    "SAS": "San Antonio Spurs",
+    "TOR": "Toronto Raptors",
+    "UTA": "Utah Jazz",
+    "WAS": "Washington Wizards",
+}
+
+TEAM_OPTIONS = [{"abbr": abbr, "name": TEAM_NAME_MAP.get(abbr, abbr)} for abbr in TEAMS]
+
 SEASON = 2026
 SEASONS = list(range(2000, SEASON + 1))[::-1]  # 2026 down to 2000
 
 model, feature_cols, games_df, teams_df, _ = load_model_and_data()
+
+# Simple in-memory cache for season/team combinations
+# Key: (season, tuple(sorted(team_abbrs))) -> (model, feature_cols, games_df, teams_df)
+SEASON_CACHE = {(SEASON, tuple(sorted(TEAMS))): (model, feature_cols, games_df, teams_df)}
+
+def get_season_resources(season: int, team_abbrs):
+    """
+    Load or train model/data for a specific season and a specific subset of teams.
+    We only scrape/train the teams requested to avoid scraping the entire season.
+    """
+    team_list = sorted(set(team_abbrs or TEAMS))
+    cache_key = (season, tuple(team_list))
+    if cache_key in SEASON_CACHE:
+        return SEASON_CACHE[cache_key]
+    # Train or load for this season with only requested teams
+    out = train_season_model(teams=team_list, season=season, force_retrain=True)
+    mdl = out.get("model")
+    fcols = out.get("feature_cols")
+    gdf = out.get("games_df")
+    tdf = out.get("teams_df")
+    SEASON_CACHE[cache_key] = (mdl, fcols, gdf, tdf)
+    return mdl, fcols, gdf, tdf
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -65,7 +122,7 @@ def index():
                 error = "Prediction model error: " + str(e)
     return render_template(
         "index.html",
-        teams=TEAMS,
+        teams=TEAM_OPTIONS,
         result=result,
         injuries_home=injuries_home,
         injuries_away=injuries_away,
@@ -106,15 +163,31 @@ def historic():
             error = "Pick different season/team combinations."
         else:
             try:
-                # Reuse the existing model pipeline (no cross-season retrain here).
-                pred = predict_winner(
-                    model, feature_cols, teams_df, team_a, team_b, home_team=team_a, games_df=games_df,
+                # Load/train season-specific resources for only the teams in that season
+                model_a, fcols_a, gdf_a, tdf_a = get_season_resources(season_a, [team_a])
+                model_b, fcols_b, gdf_b, tdf_b = get_season_resources(season_b, [team_b])
+
+                # Predict twice (neutral): Team A home in season A model, Team B home in season B model
+                pred_home = predict_winner(
+                    model_a, fcols_a, tdf_a, team_a, team_b, home_team=team_a, games_df=gdf_a,
                     injuries_home=None, injuries_away=None
                 )
-                winner = pred.get("predicted_winner", team_a)
-                home_prob = float(pred.get("home_win_prob", 0))
-                prob_a = round(home_prob * 100, 1)          # team_a is home
-                prob_b = round((1 - home_prob) * 100, 1)    # team_b is away
+                home_prob_a = float(pred_home.get("home_win_prob", 0))
+
+                pred_away_home = predict_winner(
+                    model_b, fcols_b, tdf_b, team_b, team_a, home_team=team_b, games_df=gdf_b,
+                    injuries_home=None, injuries_away=None
+                )
+                home_prob_b = float(pred_away_home.get("home_win_prob", 0))
+
+                # Neutral combine: average probabilities
+                prob_a = (home_prob_a + (1 - home_prob_b)) / 2
+                prob_b = 1 - prob_a
+
+                prob_a = round(prob_a * 100, 1)
+                prob_b = round(prob_b * 100, 1)
+                winner = team_a if prob_a >= prob_b else team_b
+
                 result = {
                     "winner": winner,
                     "team_a": team_a,
@@ -129,7 +202,7 @@ def historic():
 
     return render_template(
         "historic.html",
-        teams=TEAMS,
+        teams=TEAM_OPTIONS,
         seasons=seasons_options,
         result=result,
         selected_a=selected_a,
