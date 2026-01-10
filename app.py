@@ -5,7 +5,7 @@ from scrapingRoster import scrape_injuries
 app = Flask(__name__)
 
 TEAMS = [
-    "ATL", "BOS", "BKN", "CHA", "CHI", "CLE", "DAL", "DEN",
+    "ATL", "BOS", "BKN", "CHO", "CHI", "CLE", "DAL", "DEN",
     "DET", "GSW", "HOU", "IND", "LAC", "LAL", "MEM", "MIA",
     "MIL", "MIN", "NOP", "NYK", "OKC", "ORL", "PHI", "PHX",
     "POR", "SAC", "SAS", "TOR", "UTA", "WAS"
@@ -15,7 +15,7 @@ TEAM_NAME_MAP = {
     "ATL": "Atlanta Hawks",
     "BOS": "Boston Celtics",
     "BKN": "Brooklyn Nets",
-    "CHA": "Charlotte Hornets",
+    "CHO": "Charlotte Hornets",
     "CHI": "Chicago Bulls",
     "CLE": "Cleveland Cavaliers",
     "DAL": "Dallas Mavericks",
@@ -84,6 +84,7 @@ def index():
     notable_home = []
     notable_away = []
     adj_detail = None
+    stat_factors = None
 
     if request.method == "POST":
         home = request.form.get("home")
@@ -112,6 +113,7 @@ def index():
                 notable_home = [inj for inj in prediction.get("injuries_home", []) if "level 3" in inj]
                 notable_away = [inj for inj in prediction.get("injuries_away", []) if "level 3" in inj]
                 adj_detail = prediction.get("adjustment_detail", {})
+                stat_factors = prediction.get("stat_factors", [])
                 result = dict(
                     winner=winner,
                     confidence=confidence,
@@ -129,6 +131,7 @@ def index():
         notable_home=notable_home,
         notable_away=notable_away,
         adj_detail=adj_detail,
+        stat_factors=stat_factors,
         selected_home=selected_home,
         selected_away=selected_away,
         error=error
@@ -146,6 +149,7 @@ def historic():
     season_a = SEASONS[0]
     season_b = SEASONS[0]
     error = None
+    stat_factors = None
 
     seasons_options = [{"value": s, "label": f"{s-1}-{s}"} for s in SEASONS]
 
@@ -188,6 +192,7 @@ def historic():
                 prob_b = round(prob_b * 100, 1)
                 winner = team_a if prob_a >= prob_b else team_b
 
+                stat_factors = pred_home.get("stat_factors", [])
                 result = {
                     "winner": winner,
                     "team_a": team_a,
@@ -209,6 +214,7 @@ def historic():
         selected_b=selected_b,
         season_a=season_a,
         season_b=season_b,
+        stat_factors=stat_factors,
         error=error,
     )
 

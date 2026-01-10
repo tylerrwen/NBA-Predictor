@@ -32,7 +32,20 @@ TEAM_NAME_MAP = {
     "PHX": "PHO",  # Phoenix Suns - scraped data uses PHO
     "BKN": "BRK",  # Brooklyn Nets - scraped data uses BRK
     "CHA": "CHO",  # Charlotte Hornets - scraped data uses CHO
+    "CHO": "CHO",  # Explicitly allow CHO input
 }
+
+# Factors to surface in the UI with "better" direction and display settings
+STAT_FACTORS_CONFIG = [
+    {"key": "pt_diff", "label": "Point Differential", "better": "higher", "decimals": 1, "multiplier": 1},
+    {"key": "pts_for_avg", "label": "Points For", "better": "higher", "decimals": 1, "multiplier": 1},
+    {"key": "fg_pct_avg", "label": "Field Goal %", "better": "higher", "decimals": 1, "multiplier": 100},
+    {"key": "fg3_pct_avg", "label": "3PT %", "better": "higher", "decimals": 1, "multiplier": 100},
+    {"key": "trb_avg", "label": "Rebounds", "better": "higher", "decimals": 1, "multiplier": 1},
+    {"key": "ast_avg", "label": "Assists", "better": "higher", "decimals": 1, "multiplier": 1},
+    {"key": "tov_avg", "label": "Turnovers", "better": "lower", "decimals": 1, "multiplier": 1},
+    {"key": "opp_fg_pct_avg", "label": "Opponent FG %", "better": "lower", "decimals": 1, "multiplier": 100},
+]
 
 SEASON = 2026  # change to 2025 if needed
 MIN_SEASON = 2000  # for fallback search
@@ -696,8 +709,28 @@ def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team, games
     teamA_mapped = TEAM_NAME_MAP.get(teamA, teamA)
     teamB_mapped = TEAM_NAME_MAP.get(teamB, teamB)
     home_team_mapped = TEAM_NAME_MAP.get(home_team, home_team)
-    home = home_team_mapped
-    away = teamB_mapped if home == teamA_mapped else teamA_mapped
+
+    def resolve_team(abbr: str) -> str:
+        """
+        Resolve team abbreviation against teams_df with common aliases.
+        Ensures Charlotte works whether caller uses CHA or CHO.
+        """
+        candidates = [
+            abbr,
+            TEAM_NAME_MAP.get(abbr, abbr),
+        ]
+        if abbr in ("CHO", "CHA"):
+            candidates.extend(["CHO", "CHA"])
+        if abbr in ("PHX", "PHO"):
+            candidates.extend(["PHX", "PHO"])
+        if abbr in ("BKN", "BRK"):
+            candidates.extend(["BKN", "BRK"])
+        for cand in candidates:
+            if cand in teams_df.index:
+                return cand
+        return candidates[-1]  # fall back to last candidate
+    home = resolve_team(home_team_mapped)
+    away = resolve_team(teamB_mapped if home == teamA_mapped else teamA_mapped)
     # Check which teams are missing and provide helpful error message
     missing_teams = []
     if home not in teams_df.index:
@@ -809,8 +842,36 @@ def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team, games
     prob_away_adj = 1 - prob_home_adj
     predicted = home if prob_home_adj >= 0.5 else away
     display_prediction_report(home, away, prob_home_adj, prob_away_adj, predicted, dict(h), dict(a), injury_note_home, injury_note_away)
+    stat_factors = build_stat_factors(home, away, h, a)
     return {"home_team": home, "away_team": away, "home_win_prob": round(prob_home_adj,3), "away_win_prob": round(prob_away_adj,3), "predicted_winner": predicted,
-            "injuries_home": injury_note_home, "injuries_away": injury_note_away, "adjustment_detail": { "raw_model_prob_home": round(prob_home,3), "raw_model_prob_away": round(prob_away,3), "inj_importance_home": total_importance_home, "inj_importance_away": total_importance_away, "adj_delta_percent": (total_importance_away - total_importance_home)*adjustment*100 }}
+            "injuries_home": injury_note_home, "injuries_away": injury_note_away, "adjustment_detail": { "raw_model_prob_home": round(prob_home,3), "raw_model_prob_away": round(prob_away,3), "inj_importance_home": total_importance_home, "inj_importance_away": total_importance_away, "adj_delta_percent": (total_importance_away - total_importance_home)*adjustment*100 },
+            "stat_factors": stat_factors}
+
+
+def build_stat_factors(home_label, away_label, home_stats, away_stats, top_n=6):
+    """
+    Build a short list of the biggest stat differences that influenced the model.
+    Returns list sorted by magnitude of advantage.
+    """
+    factors = []
+    for cfg in STAT_FACTORS_CONFIG:
+        hv = float(home_stats.get(cfg["key"], 0) or 0)
+        av = float(away_stats.get(cfg["key"], 0) or 0)
+        advantage = (hv - av) if cfg["better"] == "higher" else (av - hv)
+        better_side = "home" if advantage > 0 else ("away" if advantage < 0 else "even")
+        factors.append({
+            "label": cfg["label"],
+            "key": cfg["key"],
+            "home_value": hv,
+            "away_value": av,
+            "better": better_side,
+            "decimals": cfg["decimals"],
+            "multiplier": cfg["multiplier"],
+            "direction": cfg["better"],
+            "advantage": abs(advantage)
+        })
+    factors = sorted(factors, key=lambda x: x["advantage"], reverse=True)
+    return factors[:top_n]
 
 
 def main(teams=None, season=SEASON, force_retrain=False):

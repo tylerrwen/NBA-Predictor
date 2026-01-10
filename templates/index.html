@@ -37,6 +37,35 @@
             margin-top: 10px;
             border-radius: 6px;
         }
+        .factor-card {
+            margin-top: 18px;
+            padding: 14px;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+        }
+        .factor-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 8px;
+        }
+        .factor-table th, .factor-table td {
+            padding: 8px;
+            text-align: center;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        .factor-table th {
+            text-align: left;
+            color: #475569;
+        }
+        .good { color: #0f9d58; font-weight: 700; }
+        .bad { color: #d93025; font-weight: 700; }
+        .neutral { color: #475569; font-weight: 600; }
+        .factor-note {
+            font-size: 12px;
+            color: #64748b;
+            margin-top: 6px;
+        }
     </style>
 </head>
 <body>
@@ -85,6 +114,30 @@
                         {{ adj_detail.adj_delta_percent }}% shift due to injuries
                     {% endif %}
                 </p>
+            {% endif %}
+            {% if stat_factors %}
+                <div class="factor-card">
+                    <h3>Key Factors Behind the Pick</h3>
+                    <table class="factor-table">
+                        <tr>
+                            <th>Stat</th>
+                            <th>{{ result.home }}</th>
+                            <th>{{ result.away }}</th>
+                        </tr>
+                        {% for factor in stat_factors %}
+                            <tr>
+                                <td style="text-align:left;">{{ factor.label }}</td>
+                                <td class="{% if factor.better == 'home' %}good{% elif factor.better == 'away' %}bad{% else %}neutral{% endif %}">
+                                    {{ (factor.home_value * factor.multiplier) | round(factor.decimals) }}{% if factor.multiplier == 100 %}%{% endif %}
+                                </td>
+                                <td class="{% if factor.better == 'away' %}good{% elif factor.better == 'home' %}bad{% else %}neutral{% endif %}">
+                                    {{ (factor.away_value * factor.multiplier) | round(factor.decimals) }}{% if factor.multiplier == 100 %}%{% endif %}
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </table>
+                    <p class="factor-note">Green marks the stronger side for that stat; red marks the weaker.</p>
+                </div>
             {% endif %}
             <h3>All Home Team Injuries ({{ result.home }})</h3>
             {% if injuries_home and injuries_home|length %}

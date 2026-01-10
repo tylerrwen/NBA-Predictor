@@ -73,6 +73,35 @@
             margin-bottom: 16px;
             text-align: center;
         }
+        .factor-card {
+            margin-top: 14px;
+            padding: 14px;
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+        }
+        .factor-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 8px;
+        }
+        .factor-table th, .factor-table td {
+            padding: 8px;
+            text-align: center;
+            border-bottom: 1px solid #e2e8f0;
+        }
+        .factor-table th {
+            text-align: left;
+            color: #475569;
+        }
+        .good { color: #0f9d58; font-weight: 700; }
+        .bad { color: #d93025; font-weight: 700; }
+        .neutral { color: #475569; font-weight: 600; }
+        .factor-note {
+            font-size: 12px;
+            color: #64748b;
+            margin-top: 6px;
+        }
     </style>
 </head>
 <body>
@@ -128,6 +157,30 @@
             <p><strong>Winner:</strong> {{ result.winner }}</p>
             <p>{{ result.team_a }} ({{ result.season_a }}): {{ result.prob_a }}%</p>
             <p>{{ result.team_b }} ({{ result.season_b }}): {{ result.prob_b }}%</p>
+            {% if stat_factors %}
+                <div class="factor-card">
+                    <h4 style="margin: 0 0 8px 0;">Main Stat Factors</h4>
+                    <table class="factor-table">
+                        <tr>
+                            <th>Stat</th>
+                            <th>{{ result.team_a }}</th>
+                            <th>{{ result.team_b }}</th>
+                        </tr>
+                        {% for factor in stat_factors %}
+                            <tr>
+                                <td style="text-align:left;">{{ factor.label }}</td>
+                                <td class="{% if factor.better == 'home' %}good{% elif factor.better == 'away' %}bad{% else %}neutral{% endif %}">
+                                    {{ (factor.home_value * factor.multiplier) | round(factor.decimals) }}{% if factor.multiplier == 100 %}%{% endif %}
+                                </td>
+                                <td class="{% if factor.better == 'away' %}good{% elif factor.better == 'home' %}bad{% else %}neutral{% endif %}">
+                                    {{ (factor.away_value * factor.multiplier) | round(factor.decimals) }}{% if factor.multiplier == 100 %}%{% endif %}
+                                </td>
+                            </tr>
+                        {% endfor %}
+                    </table>
+                    <p class="factor-note">Green = better for that stat; red = weaker.</p>
+                </div>
+            {% endif %}
         </div>
         {% endif %}
     </div>
