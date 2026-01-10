@@ -48,6 +48,7 @@ TEAM_OPTIONS = [{"abbr": abbr, "name": TEAM_NAME_MAP.get(abbr, abbr)} for abbr i
 
 SEASON = 2026
 SEASONS = list(range(2000, SEASON + 1))[::-1]  # 2026 down to 2000
+HISTORIC_SEASONS = [s for s in SEASONS if s < SEASON]  # remove current 2025-2026 from historic options
 
 model, feature_cols, games_df, teams_df, _ = load_model_and_data()
 
@@ -146,12 +147,12 @@ def historic():
     result = None
     selected_a = None
     selected_b = None
-    season_a = SEASONS[0]
-    season_b = SEASONS[0]
+    season_a = HISTORIC_SEASONS[0]
+    season_b = HISTORIC_SEASONS[0]
     error = None
     stat_factors = None
 
-    seasons_options = [{"value": s, "label": f"{s-1}-{s}"} for s in SEASONS]
+    seasons_options = [{"value": s, "label": f"{s-1}-{s}"} for s in HISTORIC_SEASONS]
 
     if request.method == "POST":
         team_a = request.form.get("team_a")
