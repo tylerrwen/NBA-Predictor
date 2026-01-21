@@ -4,7 +4,6 @@ import time
 
 def scrapingStats(team, season):
     url = f"https://www.basketball-reference.com/teams/{team}/{season}/gamelog/"
-    print("Requesting:", url)
 
     # Add headers to make request look more legitimate
     headers = {
@@ -96,6 +95,3 @@ def scrapingStats(team, season):
         raise Exception(f"No game data found in table for {team} {season}")
     
     return games
-
-print(scrapingStats("DET", 2026))
-

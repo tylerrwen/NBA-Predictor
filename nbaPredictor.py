@@ -15,7 +15,6 @@ try:
     USE_XGBOOST = True
 except ImportError:
     USE_XGBOOST = False
-    print("[INFO] XGBoost not installed. Using Random Forest. Install with: pip install xgboost")
 
 # import scrapers from your modules (must exist in same folder)
 from scrapingStats import scrapingStats
@@ -103,7 +102,7 @@ def save_model_and_data(model, feature_cols, games_df, teams_df, season):
     with open(TEAMS_CACHE_FILE, "wb") as f:
         pickle.dump(teams_df, f)
     
-    print(f"[OK] Model and data saved to {MODEL_DIR}/")
+    # Model and data persisted for reuse
 
 
 def load_model_and_data():
@@ -122,10 +121,8 @@ def load_model_and_data():
             teams_df = pickle.load(f)
         
         season = model_data.get("season", None)
-        print(f"[OK] Loaded saved model (trained on season {season})")
         return model_data["model"], model_data["feature_cols"], games_df, teams_df, season
-    except Exception as e:
-        print(f"[WARNING] Error loading saved model: {e}. Will train new model.")
+    except Exception:
         return None, None, None, None, None
 
 
@@ -137,10 +134,8 @@ def load_existing_games_data():
     try:
         with open(DATA_CACHE_FILE, "rb") as f:
             games_df = pickle.load(f)
-        print(f"[OK] Loaded {len(games_df)} existing games from cache")
         return games_df
-    except Exception as e:
-        print(f"[WARNING] Error loading cached games data: {e}")
+    except Exception:
         return None
 
 
@@ -173,12 +168,6 @@ def merge_games_data(existing_df, new_df):
         keep='first'
     ).sort_values('date', ascending=True).reset_index(drop=True)
     
-    new_games_count = len(combined) - len(existing_df)
-    if new_games_count > 0:
-        print(f"[INFO] Added {new_games_count} new games to existing dataset")
-    else:
-        print(f"[INFO] No new games found (all games already in dataset)")
-    
     return combined
 
 
@@ -207,12 +196,10 @@ def build_games_dataframe(teams, season):
         time.sleep(REQUEST_DELAY)
         try:
             games = scrapingStats(team, season)
-        except Exception as e:
-            print(f"Scraper error for {team} {season}: {e}")
+        except Exception:
             games = []
 
         if not games:
-            print(f"No game log found for {team} {season}. Skipping.")
             continue
 
         for g in games:
@@ -344,7 +331,6 @@ def build_games_dataframe(teams, season):
 def build_multi_season_dataframe(teams, start_season, num_seasons=NUM_SEASONS):
     """Build dataframe from single season using scrapingStats.py directly."""
     # Just use the current season - scrapingStats.py works for all teams
-    print(f"Scraping season {start_season} for {len(teams)} teams...")
     games_df = build_games_dataframe(teams, start_season)
     if not games_df.empty:
         games_df['season'] = start_season
@@ -576,12 +562,10 @@ def build_feature_matrix_and_train(games_df, teams_df):
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, random_state=42, stratify=y)
     except ValueError:
         # If stratification fails (e.g., not enough samples in each class), use regular split
-        print("[WARNING] Stratified split failed, using regular split...")
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, random_state=42)
     
     # Use XGBoost if available, otherwise fall back to Random Forest
     if USE_XGBOOST:
-        print("Using XGBoost model (better accuracy)...")
         model = xgb.XGBClassifier(
             n_estimators=300,
             max_depth=6,
@@ -595,7 +579,6 @@ def build_feature_matrix_and_train(games_df, teams_df):
             eval_metric='logloss'
         )
     else:
-        print("Using Random Forest model...")
         model = RandomForestClassifier(
             n_estimators=300,           # More trees for better accuracy
             max_depth=15,               # Prevent overfitting
@@ -607,7 +590,6 @@ def build_feature_matrix_and_train(games_df, teams_df):
             n_jobs=-1                   # Use all CPU cores
         )
     
-    print(f"Training model with {len(X_train)} training samples...")
     model.fit(X_train, y_train)
     
     # Evaluate model
@@ -617,83 +599,15 @@ def build_feature_matrix_and_train(games_df, teams_df):
     test_acc = accuracy_score(y_test, preds)
     
     # Cross-validation for more robust accuracy estimate
-    print("\nRunning cross-validation...")
     cv_scores = cross_val_score(model, X, y, cv=5, scoring='accuracy', n_jobs=-1)
-    
-    print(f"\n{'='*60}")
-    print(f"Model Performance:")
-    print(f"{'='*60}")
-    print(f"Training accuracy: {train_acc:.3f} ({len(X_train)} samples)")
-    print(f"Test accuracy:     {test_acc:.3f} ({len(X_test)} samples)")
-    print(f"CV accuracy:       {cv_scores.mean():.3f} (+/- {cv_scores.std() * 2:.3f})")
-    print(f"\nFeature importance (top 10):")
-    feature_importance = pd.DataFrame({
-        'feature': X.columns,
-        'importance': model.feature_importances_
-    }).sort_values('importance', ascending=False)
-    for idx, row in feature_importance.head(10).iterrows():
-        print(f"  {row['feature']:30s}: {row['importance']:.4f}")
-    print(f"{'='*60}\n")
     
     return model, X.columns.tolist()
 
 #
 
-def display_prediction_report(home_team, away_team, home_prob, away_prob, winner, home_stats, away_stats, injury_note_home=None, injury_note_away=None):
-    print("\n" + "="*60)
-    print("                 NBA GAME PREDICTION REPORT")
-    print("="*60 + "\n")
-    print(f"Matchup: {home_team} (Home)  vs  {away_team} (Away)\n")
-    print("-"*60)
-    print(f"*** Predicted Winner: {winner} ***")
-    print("-"*60 + "\n")
-    print("Win Probabilities:")
-    print(f"  • {home_team}: {home_prob*100:.2f}%")
-    print(f"  • {away_team}: {away_prob*100:.2f}%\n")
-    print("-"*60)
-    if injury_note_home or injury_note_away:
-        print("Injury Adjustment:")
-        if injury_note_home:
-            print(f"  {home_team} injuries: {', '.join(injury_note_home)}")
-        if injury_note_away:
-            print(f"  {away_team} injuries: {', '.join(injury_note_away)}")
-        print("-"*60)
-    # Notable injuries section
-    notable_home = [note for note in (injury_note_home or []) if '(level 3' in note]
-    notable_away = [note for note in (injury_note_away or []) if '(level 3' in note]
-    print("Notable Injuries:")
-    if (notable_home or notable_away):
-        if notable_home:
-            print(f"  {home_team}: {', '.join(notable_home)}")
-        if notable_away:
-            print(f"  {away_team}: {', '.join(notable_away)}")
-    else:
-        print("  None.")
-    print("-"*60)
-    print("Team Season Averages:\n")
-    print(f"{home_team}:")
-    print(f"  • Points Scored:      {home_stats.get('pts_for_avg', 0):.1f}")
-    print(f"  • Points Allowed:     {home_stats.get('pts_against_avg', 0):.1f}")
-    print(f"  • Point Differential: {home_stats.get('pt_diff', 0):+.1f}")
-    print(f"  • FG%:               {home_stats.get('fg_pct_avg', 0):.3f}")
-    print(f"  • 3PT%:              {home_stats.get('fg3_pct_avg', 0):.3f}")
-    print(f"  • Rebounds:          {home_stats.get('trb_avg', 0):.1f}")
-    print(f"  • Assists:           {home_stats.get('ast_avg', 0):.1f}")
-    print(f"  • Steals:            {home_stats.get('stl_avg', 0):.1f}")
-    print(f"  • Blocks:            {home_stats.get('blk_avg', 0):.1f}")
-    print(f"  • Turnovers:         {home_stats.get('tov_avg', 0):.1f}\n")
-    print(f"{away_team}:")
-    print(f"  • Points Scored:      {away_stats.get('pts_for_avg', 0):.1f}")
-    print(f"  • Points Allowed:     {away_stats.get('pts_against_avg', 0):.1f}")
-    print(f"  • Point Differential: {away_stats.get('pt_diff', 0):+.1f}")
-    print(f"  • FG%:               {away_stats.get('fg_pct_avg', 0):.3f}")
-    print(f"  • 3PT%:              {away_stats.get('fg3_pct_avg', 0):.3f}")
-    print(f"  • Rebounds:          {away_stats.get('trb_avg', 0):.1f}")
-    print(f"  • Assists:           {away_stats.get('ast_avg', 0):.1f}")
-    print(f"  • Steals:            {away_stats.get('stl_avg', 0):.1f}")
-    print(f"  • Blocks:            {away_stats.get('blk_avg', 0):.1f}")
-    print(f"  • Turnovers:         {away_stats.get('tov_avg', 0):.1f}")
-    print("\n" + "="*60 + "\n")
+def display_prediction_report(*args, **kwargs):
+    """Previously used for console output; now intentionally silent."""
+    return
 
 
 def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team, games_df=None, injuries_home=None, injuries_away=None):
@@ -878,8 +792,6 @@ def main(teams=None, season=SEASON, force_retrain=False):
     # Use all teams by default for more training data
     if teams is None:
         teams = TEAMS_ALL
-        print(f"Using all {len(teams)} teams for maximum training data")
-    print("Starting NBA Predictor pipeline...")
     
     # Try to load saved model and data
     model = None
@@ -904,39 +816,28 @@ def main(teams=None, season=SEASON, force_retrain=False):
                 # Check if model needs retraining
                 needs_retrain = False
                 if saved_season != season:
-                    print(f"[WARNING] Saved model is for season {saved_season}, but requested season is {season}.")
                     needs_retrain = True
                 elif model_version < 2:
-                    print(f"[WARNING] Saved model is old version ({model_version}). New version includes recent form features.")
                     needs_retrain = True
                 elif saved_num_seasons != NUM_SEASONS:
-                    print(f"[WARNING] Saved model used {saved_num_seasons} seasons, but current setting is {NUM_SEASONS}.")
                     needs_retrain = True
                 
                 if needs_retrain:
-                    print("   Retraining with new settings...")
                     model = None  # Force retrain
-            except Exception as e:
-                print(f"[WARNING] Could not check model version: {e}")
+            except Exception:
                 model = None  # Force retrain to be safe
     
     # Always scrape new data to check for new games (incremental learning)
-    print(f"Scraping season {season} for {len(teams)} teams using scrapingStats.py...")
     new_games_df = build_games_dataframe(teams, season)
     
     if new_games_df.empty:
         if existing_games_df is not None and not existing_games_df.empty:
-            print("No new games scraped. Using existing cached model and data.")
             games_df = existing_games_df
             if model is None:
-                print("[WARNING] No model available and no new games scraped. Cannot proceed.")
                 return
         else:
-            print("No games were scraped for any team and no cached data exists. Exiting.")
             return
     else:
-        print(f"Scraped {len(new_games_df)} unique games from season {season}.")
-        
         # Merge new games with existing games (incremental learning)
         games_df = merge_games_data(existing_games_df, new_games_df)
         
@@ -944,35 +845,15 @@ def main(teams=None, season=SEASON, force_retrain=False):
         has_new_games = existing_games_df is None or len(games_df) > len(existing_games_df)
         needs_retrain = model is None or force_retrain or has_new_games
         
-        if has_new_games and model is not None:
-            print(f"[INFO] Found new games! Retraining model with accumulated data ({len(games_df)} total games)...")
-        
         if needs_retrain:
-            print("Computing team aggregates from all available games...")
             teams_df = compute_team_aggregates(games_df)
-            print("\nTeam aggregates (sample):")
-            print(teams_df.head())
-            print(f"\nTraining model on {len(games_df)} total games (accumulated from all runs)...")
             model, feature_cols = build_feature_matrix_and_train(games_df, teams_df)
             
             # Save the newly trained model with accumulated data
             save_model_and_data(model, feature_cols, games_df, teams_df, season)
         else:
             # Use existing model but update teams_df with latest aggregates
-            print(f"Using cached model. Updating team aggregates with latest data...")
             teams_df = compute_team_aggregates(games_df)
-            print(f"Using cached model: {len(games_df)} games, {len(teams_df)} teams")
-            print("\nTeam aggregates (sample):")
-            print(teams_df.head())
-    
-    # Example prediction: take first two teams with aggregates
-    available = list(teams_df.index)
-    if len(available) >= 2:
-        a = "GSW"; b = "OKC"; home = a
-        print("\nExample prediction:")
-        predict_winner(model, feature_cols, teams_df, a, b, home, games_df)
-    else:
-        print("Not enough teams with aggregates to produce an example prediction.")
     return {"games_df": games_df, "teams_df": teams_df, "model": model, "feature_cols": feature_cols}
 
 if __name__ == "__main__":

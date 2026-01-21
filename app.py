@@ -222,5 +222,3 @@ def historic():
 if __name__ == "__main__":
     app.run(debug=True)
     import os
-    print("TEMPLATE FOLDER LOCATION:", os.path.abspath("templates"))
-

@@ -107,8 +107,3 @@ def predict_matchup(team1: str, team2: str, home_team: str):
     }
 
 
-# -------------------------
-# Example usage:
-# -------------------------
-result = predict_matchup("Celtics", "Raptors", home_team="Celtics")
-print(result)

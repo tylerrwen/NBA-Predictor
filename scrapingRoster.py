@@ -3,11 +3,9 @@ from bs4 import BeautifulSoup, Comment
 
 def scrape_injuries(team: str, season: int):
     url = f"https://www.basketball-reference.com/teams/{team}/{season}.html"
-    print("Requesting injury report:", url)
 
     r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
     if r.status_code != 200:
-        print("Page could not be loaded:", r.status_code)
         return []
 
     soup = BeautifulSoup(r.text, "html.parser")
@@ -28,7 +26,6 @@ def scrape_injuries(team: str, season: int):
 
     # --- 3. If STILL no table -> no injuries listed ---
     if table is None:
-        print(f"No injuries table found for {team} — probably no injuries.")
         return []
 
     tbody = table.find("tbody")
@@ -58,10 +55,3 @@ def scrape_injuries(team: str, season: int):
     return injuries
 
 
-
-# Test the scraper
-if __name__ == "__main__":
-    data = scrape_injuries("OKC", 2026)
-    print("Injuries:")
-    for inj in data:
-        print(inj)
