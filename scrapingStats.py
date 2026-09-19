@@ -14,20 +14,29 @@ def scrapingStats(team, season):
         'Connection': 'keep-alive',
     }
 
-    try:
-        r = requests.get(url, headers=headers, timeout=10)
-        
-        # Handle rate limiting
+    # basketball-reference throttles bursts with HTTP 429, so retry with backoff.
+    r = None
+    max_attempts = 4
+    for attempt in range(max_attempts):
+        try:
+            r = requests.get(url, headers=headers, timeout=15)
+        except requests.exceptions.RequestException as e:
+            if attempt == max_attempts - 1:
+                raise Exception(f"Failed to fetch URL: {e}")
+            time.sleep(5 * (attempt + 1))
+            continue
+
         if r.status_code == 429:
-            raise Exception(f"Rate limited (429). Please wait before trying again.")
-        
-        r.raise_for_status()  # Raise an exception for other bad status codes
+            if attempt == max_attempts - 1:
+                raise Exception("Rate limited (429) after retries. Try again later.")
+            time.sleep(10 * (attempt + 1))  # back off, then retry
+            continue
+        break
+
+    try:
+        r.raise_for_status()
     except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 429:
-            raise Exception(f"Rate limited (429). Please wait before trying again.")
-        raise Exception(f"HTTP error {e.response.status_code}: {e}")
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"Failed to fetch URL: {e}")
+        raise Exception(f"HTTP error {r.status_code}: {e}")
 
     soup = BeautifulSoup(r.text, "html.parser")
 

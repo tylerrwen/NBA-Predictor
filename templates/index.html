@@ -1,165 +1,221 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>NBA Predictor</title>
-    <style>
-        body { font-family: Arial; background: #f3f3f3; padding: 30px; }
-        .card {
-            background: white;
-            padding: 24px;
-            border-radius: 12px;
-            width: 700px; /* widened table/card */
-            max-width: 90vw;
-            margin: auto;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
-        }
-        h1 { text-align: center; }
-        select, button {
-            width: 100%;
-            padding: 12px;
-            margin-top: 10px;
-            border-radius: 6px;
-            border: 1px solid #ccc;
-            font-size: 16px; /* larger team text */
-        }
-        button {
-            background: #0066ff;
-            color: white;
-            cursor: pointer;
-            transition: 0.2s;
-        }
-        button:hover { background: #004bcc; }
-
-        .injury-list {
-            background: #fff6f6;
-            border-left: 4px solid #d90000;
-            padding: 10px;
-            margin-top: 10px;
-            border-radius: 6px;
-        }
-        .factor-card {
-            margin-top: 18px;
-            padding: 14px;
-            background: #f8fafc;
-            border: 1px solid #e2e8f0;
-            border-radius: 10px;
-        }
-        .factor-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 8px;
-        }
-        .factor-table th, .factor-table td {
-            padding: 8px;
-            text-align: center;
-            border-bottom: 1px solid #e2e8f0;
-        }
-        .factor-table th {
-            text-align: left;
-            color: #475569;
-        }
-        .good { color: #0f9d58; font-weight: 700; }
-        .bad { color: #d93025; font-weight: 700; }
-        .neutral { color: #475569; font-weight: 600; }
-        .factor-note {
-            font-size: 12px;
-            color: #64748b;
-            margin-top: 6px;
-        }
-    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-    <div class="card">
-        <h1>NBA Game Predictor</h1>
-        <p style="text-align:center; margin-top:6px; font-size:14px;">
-            Want historic matchups? <a href="/historic">Go to Historic Predictor</a>
-        </p>
+    <header class="topbar">
+        <a href="/" class="brand">
+            <span class="brand-mark"></span>
+            <span class="brand-name">NBA Predictor</span>
+        </a>
+        <nav class="nav">
+            <a href="/" class="active">Live</a>
+            <a href="/historic">Historic</a>
+        </nav>
+    </header>
+
+    <main class="wrap">
+        <div class="page-head">
+            <h1 class="page-title">Pick a matchup</h1>
+            <p class="page-sub">Choose a home and away team. The model rates each side on scoring, shooting, rebounding, defense, recent form, Elo and injuries.</p>
+        </div>
+
+        {% if error %}
+            <div class="alert">{{ error }}</div>
+        {% endif %}
 
         <form method="POST">
-            {% if error %}
-                <p style="color:red;"><strong>{{ error }}</strong></p>
-            {% endif %}
-            <label>Select Home Team</label>
-            <select name="home">
-                {% for t in teams %}
-                    <option value="{{ t.abbr }}" {% if t.abbr == selected_home %}selected{% endif %}>{{ t.name }}</option>
-                {% endfor %}
-            </select>
-
-            <label>Select Away Team</label>
-            <select name="away">
-                {% for t in teams %}
-                    <option value="{{ t.abbr }}" {% if t.abbr == selected_away %}selected{% endif %}>{{ t.name }}</option>
-                {% endfor %}
-            </select>
-
-            <button type="submit">Predict</button>
+            <div class="matchup">
+                <div class="field">
+                    <label class="field-label" for="home">Home</label>
+                    <select class="select" name="home" id="home">
+                        {% for t in teams %}
+                            <option value="{{ t.abbr }}" {% if t.abbr == selected_home %}selected{% endif %}>{{ t.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="vs">VS</div>
+                <div class="field">
+                    <label class="field-label" for="away">Away</label>
+                    <select class="select" name="away" id="away">
+                        {% for t in teams %}
+                            <option value="{{ t.abbr }}" {% if t.abbr == selected_away %}selected{% endif %}>{{ t.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="actions" style="grid-column: 1 / -1;">
+                    <button type="submit" class="btn">Predict winner</button>
+                </div>
+            </div>
         </form>
 
         {% if result %}
-            <h2 style="margin-top:20px;">Prediction Result</h2>
-            <p><strong>Predicted Winner:</strong> {{ result.winner }}</p>
-            <p><strong>Confidence:</strong> {{ result.confidence }}%</p>
-            {% if adj_detail %}
-                <p>
-                    <strong>{{ result.home }} win probability:</strong>
-                    {{ (adj_detail.raw_model_prob_home * 100) | round(1, 'floor') }}% →
-                    {{ result.confidence if result.home == result.winner else (100 - result.confidence) }}%<br>
-                    <strong>{{ result.away }} win probability:</strong>
-                    {{ (adj_detail.raw_model_prob_away * 100) | round(1, 'floor') }}% →
-                    {{ result.confidence if result.away == result.winner else (100 - result.confidence) }}%
-                </p>
-                <p><strong>Injury Adjustment:</strong>
-                    {% if adj_detail.adj_delta_percent %}
-                        {{ adj_detail.adj_delta_percent }}% shift due to injuries
+            {% set home_pct = result.confidence if result.home == result.winner else (100 - result.confidence) %}
+            {% set away_pct = (100 - home_pct) | round(1) %}
+            {% set winner_name = (teams | selectattr('abbr', 'equalto', result.winner) | map(attribute='name') | first) %}
+            <div class="result">
+                <section class="panel animate-in">
+                    <p class="eyebrow">Predicted winner</p>
+                    <div class="winner-row">
+                        <div class="winner-team">
+                            {{ result.winner }}
+                            <small>{{ winner_name or result.winner }}</small>
+                        </div>
+                        <div class="winner-conf">
+                            <b>{{ result.confidence }}%</b>
+                            <span>Win probability</span>
+                        </div>
+                    </div>
+
+                    <div class="probbar">
+                        <div class="probbar-track">
+                            <div class="probbar-home" style="width: {{ home_pct }}%;"></div>
+                            <div class="probbar-away" style="width: {{ away_pct }}%;"></div>
+                        </div>
+                        <div class="probbar-legend">
+                            <span class="home">{{ result.home }} <b>{{ home_pct }}%</b></span>
+                            <span class="away"><b>{{ away_pct }}%</b> {{ result.away }}</span>
+                        </div>
+                    </div>
+
+                    {% if adj_detail %}
+                        <div class="breakdown">
+                            <div class="row">
+                                <span>Model probability ({{ result.home }})</span>
+                                <b>{{ (adj_detail.raw_model_prob_home * 100) | round(1) }}%</b>
+                            </div>
+                            {% if adj_detail.adj_delta_percent %}
+                                <div class="row">
+                                    <span>Injury adjustment</span>
+                                    <b>{{ adj_detail.adj_delta_percent | round(1) }}%</b>
+                                </div>
+                            {% endif %}
+                        </div>
                     {% endif %}
-                </p>
-            {% endif %}
-            {% if stat_factors %}
-                <div class="factor-card">
-                    <h3>Key Factors Behind the Pick</h3>
-                    <table class="factor-table">
-                        <tr>
-                            <th>Stat</th>
-                            <th>{{ result.home }}</th>
-                            <th>{{ result.away }}</th>
-                        </tr>
+                </section>
+
+                {% if stat_factors %}
+                    <section class="panel animate-in">
+                        <p class="eyebrow">Key factors</p>
+                        <div class="factor-heads">
+                            <span class="home">{{ result.home }}</span>
+                            <span class="mid">Stat</span>
+                            <span class="away">{{ result.away }}</span>
+                        </div>
                         {% for factor in stat_factors %}
-                            <tr>
-                                <td style="text-align:left;">{{ factor.label }}</td>
-                                <td class="{% if factor.better == 'home' %}good{% elif factor.better == 'away' %}bad{% else %}neutral{% endif %}">
+                            <div class="factor">
+                                <div class="val home {{ 'lead' if factor.better == 'home' else 'trail' }}">
                                     {{ (factor.home_value * factor.multiplier) | round(factor.decimals) }}{% if factor.multiplier == 100 %}%{% endif %}
-                                </td>
-                                <td class="{% if factor.better == 'away' %}good{% elif factor.better == 'home' %}bad{% else %}neutral{% endif %}">
+                                </div>
+                                <div class="label">{{ factor.label }}</div>
+                                <div class="val away {{ 'lead' if factor.better == 'away' else 'trail' }}">
                                     {{ (factor.away_value * factor.multiplier) | round(factor.decimals) }}{% if factor.multiplier == 100 %}%{% endif %}
-                                </td>
-                            </tr>
+                                </div>
+                            </div>
                         {% endfor %}
-                    </table>
-                    <p class="factor-note">Green marks the stronger side for that stat; red marks the weaker.</p>
-                </div>
-            {% endif %}
-            <h3>All Home Team Injuries ({{ result.home }})</h3>
-            {% if injuries_home and injuries_home|length %}
-                <div class="injury-list">
-                    {% for inj in injuries_home %}
-                        <p><strong>{{ inj.player }}</strong> — {{ inj.description }} ({{ inj["update"] }})</p>
-                    {% endfor %}
-                </div>
-            {% else %}
-                <p>No recorded injuries</p>
-            {% endif %}
-            <h3>All Away Team Injuries ({{ result.away }})</h3>
-            {% if injuries_away and injuries_away|length %}
-                <div class="injury-list">
-                    {% for inj in injuries_away %}
-                        <p><strong>{{ inj.player }}</strong> — {{ inj.description }} ({{ inj["update"] }})</p>
-                    {% endfor %}
-                </div>
-            {% else %}
-                <p>No recorded injuries</p>
-            {% endif %}
+                    </section>
+                {% endif %}
+
+                {% if players_home or players_away %}
+                    {% set injured_home = injuries_home | map(attribute='player') | list %}
+                    {% set injured_away = injuries_away | map(attribute='player') | list %}
+                    <section class="panel animate-in">
+                        <p class="eyebrow">Key players</p>
+                        <p class="stale-note">Impact is season Win Shares. Higher means the player contributed more wins.</p>
+                        <div class="players-grid">
+                            <div class="players-col">
+                                <h3>{{ result.home }}</h3>
+                                {% for p in players_home %}
+                                    <div class="player {{ 'is-out' if p.player in injured_home else '' }}">
+                                        <div class="player-top">
+                                            <span class="player-name">
+                                                {{ p.player }}
+                                                {% if p.player in injured_home %}<span class="out-tag">OUT</span>{% endif %}
+                                            </span>
+                                            <span class="player-impact"><b>{{ p.ws if p.ws is not none else p.impact }}</b> WS</span>
+                                        </div>
+                                        <div class="player-meta">{{ p.pos }} · {{ (p.mpg or 0) | round }} MPG</div>
+                                        <div class="player-pills">
+                                            <span class="pill"><b>{{ (p.ppg or 0) | round(1) }}</b> PPG</span>
+                                            <span class="pill"><b>{{ (p.rpg or 0) | round(1) }}</b> REB</span>
+                                            <span class="pill"><b>{{ (p.apg or 0) | round(1) }}</b> AST</span>
+                                        </div>
+                                    </div>
+                                {% else %}
+                                    <p class="empty">No player data</p>
+                                {% endfor %}
+                            </div>
+                            <div class="players-col">
+                                <h3>{{ result.away }}</h3>
+                                {% for p in players_away %}
+                                    <div class="player {{ 'is-out' if p.player in injured_away else '' }}">
+                                        <div class="player-top">
+                                            <span class="player-name">
+                                                {{ p.player }}
+                                                {% if p.player in injured_away %}<span class="out-tag">OUT</span>{% endif %}
+                                            </span>
+                                            <span class="player-impact"><b>{{ p.ws if p.ws is not none else p.impact }}</b> WS</span>
+                                        </div>
+                                        <div class="player-meta">{{ p.pos }} · {{ (p.mpg or 0) | round }} MPG</div>
+                                        <div class="player-pills">
+                                            <span class="pill"><b>{{ (p.ppg or 0) | round(1) }}</b> PPG</span>
+                                            <span class="pill"><b>{{ (p.rpg or 0) | round(1) }}</b> REB</span>
+                                            <span class="pill"><b>{{ (p.apg or 0) | round(1) }}</b> AST</span>
+                                        </div>
+                                    </div>
+                                {% else %}
+                                    <p class="empty">No player data</p>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </section>
+                {% endif %}
+
+                <section class="panel animate-in">
+                    <p class="eyebrow">Injuries</p>
+                    {% if injuries_updated %}
+                        <p class="stale-note">Injury data cached {{ injuries_updated }}</p>
+                    {% endif %}
+                    <div class="injury-grid">
+                        <div class="injury-col">
+                            <h3>{{ result.home }}</h3>
+                            {% if injuries_home %}
+                                {% for inj in injuries_home %}
+                                    <div class="injury">
+                                        <div class="name">{{ inj.player }}</div>
+                                        {% if inj.description %}<div class="desc">{{ inj.description }}</div>{% endif %}
+                                        {% if inj["update"] %}<div class="when">Updated {{ inj["update"] }}</div>{% endif %}
+                                    </div>
+                                {% endfor %}
+                            {% else %}
+                                <p class="empty">No reported injuries</p>
+                            {% endif %}
+                        </div>
+                        <div class="injury-col">
+                            <h3>{{ result.away }}</h3>
+                            {% if injuries_away %}
+                                {% for inj in injuries_away %}
+                                    <div class="injury">
+                                        <div class="name">{{ inj.player }}</div>
+                                        {% if inj.description %}<div class="desc">{{ inj.description }}</div>{% endif %}
+                                        {% if inj["update"] %}<div class="when">Updated {{ inj["update"] }}</div>{% endif %}
+                                    </div>
+                                {% endfor %}
+                            {% else %}
+                                <p class="empty">No reported injuries</p>
+                            {% endif %}
+                        </div>
+                    </div>
+                </section>
+            </div>
         {% endif %}
-    </div>
+    </main>
 </body>
 </html>

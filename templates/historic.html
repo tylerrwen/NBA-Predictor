@@ -1,189 +1,123 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Historic NBA Matchup</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background: #f7f9fc;
-            margin: 0;
-            padding: 0;
-            color: #1e293b;
-        }
-        .page {
-            max-width: 900px;
-            margin: 40px auto;
-            background: #fff;
-            border-radius: 12px;
-            box-shadow: 0 10px 30px rgba(15,23,42,0.08);
-            padding: 32px;
-        }
-        h1 {
-            text-align: center;
-            margin-bottom: 24px;
-        }
-        form {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 20px;
-            margin-bottom: 24px;
-        }
-        .card {
-            background: #f8fafc;
-            border: 1px solid #e2e8f0;
-            border-radius: 10px;
-            padding: 16px;
-        }
-        label {
-            display: block;
-            font-weight: 600;
-            margin-bottom: 6px;
-        }
-        select, button {
-            width: 100%;
-            padding: 10px 12px;
-            border: 1px solid #cbd5e1;
-            border-radius: 8px;
-            font-size: 14px;
-            background: #fff;
-        }
-        button {
-            background: #0ea5e9;
-            color: #fff;
-            border: none;
-            font-weight: 700;
-            cursor: pointer;
-            transition: background 0.2s ease;
-        }
-        button:hover {
-            background: #0284c7;
-        }
-        .result {
-            background: #ecfeff;
-            border: 1px solid #bae6fd;
-            border-radius: 10px;
-            padding: 16px;
-        }
-        .error {
-            background: #fef2f2;
-            border: 1px solid #fecdd3;
-            color: #b91c1c;
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 16px;
-            text-align: center;
-        }
-        .factor-card {
-            margin-top: 14px;
-            padding: 14px;
-            background: #f8fafc;
-            border: 1px solid #e2e8f0;
-            border-radius: 10px;
-        }
-        .factor-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 8px;
-        }
-        .factor-table th, .factor-table td {
-            padding: 8px;
-            text-align: center;
-            border-bottom: 1px solid #e2e8f0;
-        }
-        .factor-table th {
-            text-align: left;
-            color: #475569;
-        }
-        .good { color: #0f9d58; font-weight: 700; }
-        .bad { color: #d93025; font-weight: 700; }
-        .neutral { color: #475569; font-weight: 600; }
-        .factor-note {
-            font-size: 12px;
-            color: #64748b;
-            margin-top: 6px;
-        }
-    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-    <div class="page">
-        <h1 style="color:#0f172a;">Historic NBA Matchup Predictor</h1>
-        <p style="text-align:center; margin-top:8px;">
-            <a href="/" style="color:#0284c7; text-decoration:none; font-weight:600;">Back to Regular Predictor</a>
-        </p>
+    <header class="topbar">
+        <a href="/" class="brand">
+            <span class="brand-mark"></span>
+            <span class="brand-name">NBA Predictor</span>
+        </a>
+        <nav class="nav">
+            <a href="/">Live</a>
+            <a href="/historic" class="active">Historic</a>
+        </nav>
+    </header>
+
+    <main class="wrap">
+        <div class="page-head">
+            <h1 class="page-title">Historic matchup</h1>
+            <p class="page-sub">Pit two teams from different seasons against each other. Each side is rated by that season's form on neutral ground.</p>
+        </div>
 
         {% if error %}
-        <div class="error">{{ error }}</div>
+            <div class="alert">{{ error }}</div>
         {% endif %}
 
         <form method="POST">
-            <div class="card">
-                <label>Team A</label>
-                <select name="team_a">
-                    {% for t in teams %}
-                        <option value="{{ t.abbr }}" {% if selected_a == t.abbr %}selected{% endif %}>{{ t.name }}</option>
-                    {% endfor %}
-                </select>
-                <label style="margin-top:10px;">Season</label>
-                <select name="season_a">
-                    {% for s in seasons %}
-                        <option value="{{ s.value }}" {% if season_a == s.value %}selected{% endif %}>{{ s.label }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-
-            <div class="card">
-                <label>Team B</label>
-                <select name="team_b">
-                    {% for t in teams %}
-                        <option value="{{ t.abbr }}" {% if selected_b == t.abbr %}selected{% endif %}>{{ t.name }}</option>
-                    {% endfor %}
-                </select>
-                <label style="margin-top:10px;">Season</label>
-                <select name="season_b">
-                    {% for s in seasons %}
-                        <option value="{{ s.value }}" {% if season_b == s.value %}selected{% endif %}>{{ s.label }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-
-            <div class="card" style="align-self:end;">
-                <button type="submit">Predict</button>
+            <div class="matchup">
+                <div class="field">
+                    <label class="field-label" for="team_a">Team A</label>
+                    <select class="select" name="team_a" id="team_a">
+                        {% for t in teams %}
+                            <option value="{{ t.abbr }}" {% if selected_a == t.abbr %}selected{% endif %}>{{ t.name }}</option>
+                        {% endfor %}
+                    </select>
+                    <select class="select" name="season_a" style="margin-top: 10px;">
+                        {% for s in seasons %}
+                            <option value="{{ s.value }}" {% if season_a == s.value %}selected{% endif %}>{{ s.label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="vs">VS</div>
+                <div class="field">
+                    <label class="field-label" for="team_b">Team B</label>
+                    <select class="select" name="team_b" id="team_b">
+                        {% for t in teams %}
+                            <option value="{{ t.abbr }}" {% if selected_b == t.abbr %}selected{% endif %}>{{ t.name }}</option>
+                        {% endfor %}
+                    </select>
+                    <select class="select" name="season_b" style="margin-top: 10px;">
+                        {% for s in seasons %}
+                            <option value="{{ s.value }}" {% if season_b == s.value %}selected{% endif %}>{{ s.label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="actions" style="grid-column: 1 / -1;">
+                    <button type="submit" class="btn">Predict winner</button>
+                </div>
             </div>
         </form>
 
         {% if result %}
-        <div class="result">
-            <h3>Result</h3>
-            <p><strong>Winner:</strong> {{ result.winner }}</p>
-            <p>{{ result.team_a }} ({{ result.season_a }}): {{ result.prob_a }}%</p>
-            <p>{{ result.team_b }} ({{ result.season_b }}): {{ result.prob_b }}%</p>
-            {% if stat_factors %}
-                <div class="factor-card">
-                    <h4 style="margin: 0 0 8px 0;">Main Stat Factors</h4>
-                    <table class="factor-table">
-                        <tr>
-                            <th>Stat</th>
-                            <th>{{ result.team_a }}</th>
-                            <th>{{ result.team_b }}</th>
-                        </tr>
+            {% set a_leads = result.prob_a >= result.prob_b %}
+            {% set winner_pct = result.prob_a if a_leads else result.prob_b %}
+            <div class="result">
+                <section class="panel animate-in">
+                    <p class="eyebrow">Predicted winner</p>
+                    <div class="winner-row">
+                        <div class="winner-team">
+                            {{ result.winner }}
+                            <small>{{ (result.season_a - 1) if a_leads else (result.season_b - 1) }}-{{ result.season_a if a_leads else result.season_b }} season</small>
+                        </div>
+                        <div class="winner-conf">
+                            <b>{{ winner_pct }}%</b>
+                            <span>Win probability</span>
+                        </div>
+                    </div>
+
+                    <div class="probbar">
+                        <div class="probbar-track">
+                            <div class="probbar-home" style="width: {{ result.prob_a }}%;"></div>
+                            <div class="probbar-away" style="width: {{ result.prob_b }}%;"></div>
+                        </div>
+                        <div class="probbar-legend">
+                            <span class="home">{{ result.team_a }} '{{ '%02d' % (result.season_a % 100) }} <b>{{ result.prob_a }}%</b></span>
+                            <span class="away"><b>{{ result.prob_b }}%</b> {{ result.team_b }} '{{ '%02d' % (result.season_b % 100) }}</span>
+                        </div>
+                    </div>
+                </section>
+
+                {% if stat_factors %}
+                    <section class="panel animate-in">
+                        <p class="eyebrow">Key factors</p>
+                        <div class="factor-heads">
+                            <span class="home">{{ result.team_a }}</span>
+                            <span class="mid">Stat</span>
+                            <span class="away">{{ result.team_b }}</span>
+                        </div>
                         {% for factor in stat_factors %}
-                            <tr>
-                                <td style="text-align:left;">{{ factor.label }}</td>
-                                <td class="{% if factor.better == 'home' %}good{% elif factor.better == 'away' %}bad{% else %}neutral{% endif %}">
+                            <div class="factor">
+                                <div class="val home {{ 'lead' if factor.better == 'home' else 'trail' }}">
                                     {{ (factor.home_value * factor.multiplier) | round(factor.decimals) }}{% if factor.multiplier == 100 %}%{% endif %}
-                                </td>
-                                <td class="{% if factor.better == 'away' %}good{% elif factor.better == 'home' %}bad{% else %}neutral{% endif %}">
+                                </div>
+                                <div class="label">{{ factor.label }}</div>
+                                <div class="val away {{ 'lead' if factor.better == 'away' else 'trail' }}">
                                     {{ (factor.away_value * factor.multiplier) | round(factor.decimals) }}{% if factor.multiplier == 100 %}%{% endif %}
-                                </td>
-                            </tr>
+                                </div>
+                            </div>
                         {% endfor %}
-                    </table>
-                    <p class="factor-note">Green = better for that stat</p>                   
-                    <p class="factor-note">Red = weaker</p>
-                </div>
-            {% endif %}
-        </div>
+                    </section>
+                {% endif %}
+            </div>
         {% endif %}
-    </div>
+    </main>
 </body>
 </html>

@@ -1,6 +1,10 @@
+import pandas as pd
 from flask import Flask, render_template, request
-from nbaPredictor import load_model_and_data, predict_winner, main as train_season_model
-from scrapingRoster import scrape_injuries
+from nbaPredictor import load_model_and_data, predict_winner, compute_team_season_stats
+from caches import load_injuries, load_players, load_team_season, save_team_season
+
+# basketball-reference uses different gamelog abbreviations for a few teams.
+BR_ABBR_MAP = {"BKN": "BRK", "PHX": "PHO"}
 
 app = Flask(__name__)
 
@@ -52,27 +56,40 @@ HISTORIC_SEASONS = [s for s in SEASONS if s < SEASON]  # remove current 2025-202
 
 model, feature_cols, games_df, teams_df, _ = load_model_and_data()
 
-# Simple in-memory cache for season/team combinations
-# Key: (season, tuple(sorted(team_abbrs))) -> (model, feature_cols, games_df, teams_df)
-SEASON_CACHE = {(SEASON, tuple(sorted(TEAMS))): (model, feature_cols, games_df, teams_df)}
+# Injuries and key players are scraped offline by build_cache.py and served from disk.
+INJURIES_BY_TEAM, INJURIES_SEASON, INJURIES_UPDATED = load_injuries()
+PLAYERS_BY_TEAM, PLAYERS_SEASON, PLAYERS_UPDATED = load_players()
 
-def get_season_resources(season: int, team_abbrs):
+
+def annotate_injuries(injuries, players):
+    """Tag each injured player with their impact tier (from the key-player cache)
+    so the prediction weights a star's absence more than a benchwarmer's."""
+    tier_by_name = {p.get("player"): p.get("tier") for p in players}
+    for inj in injuries:
+        inj["impact_tier"] = tier_by_name.get(inj.get("player"))
+    return injuries
+
+_TEAM_SEASON_MEM = {}  # (season, br_abbr) -> stats dict, in-process cache
+
+
+def get_team_season_stats(season: int, app_abbr: str):
     """
-    Load or train model/data for a specific season and a specific subset of teams.
-    We only scrape/train the teams requested to avoid scraping the entire season.
+    Return (br_abbr, stats_dict) for a team in a given season. Served from disk
+    cache; scraped on demand the first time a season/team is requested, then
+    cached so repeat queries are instant. The live predictor never calls this.
     """
-    team_list = sorted(set(team_abbrs or TEAMS))
-    cache_key = (season, tuple(team_list))
-    if cache_key in SEASON_CACHE:
-        return SEASON_CACHE[cache_key]
-    # Train or load for this season with only requested teams
-    out = train_season_model(teams=team_list, season=season, force_retrain=True)
-    mdl = out.get("model")
-    fcols = out.get("feature_cols")
-    gdf = out.get("games_df")
-    tdf = out.get("teams_df")
-    SEASON_CACHE[cache_key] = (mdl, fcols, gdf, tdf)
-    return mdl, fcols, gdf, tdf
+    br = BR_ABBR_MAP.get(app_abbr, app_abbr)
+    key = (season, br)
+    if key in _TEAM_SEASON_MEM:
+        return br, _TEAM_SEASON_MEM[key]
+    stats = load_team_season(season, br)
+    if stats is None:
+        stats = compute_team_season_stats(br, season)
+        if not stats:
+            raise LookupError(f"No data available for {app_abbr} in {season - 1}-{season}.")
+        save_team_season(season, br, stats)
+    _TEAM_SEASON_MEM[key] = stats
+    return br, stats
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -86,6 +103,8 @@ def index():
     notable_away = []
     adj_detail = None
     stat_factors = None
+    players_home = []
+    players_away = []
 
     if request.method == "POST":
         home = request.form.get("home")
@@ -97,8 +116,10 @@ def index():
         elif home == away:
             error = "Teams must be different."
         else:
-            injuries_home = scrape_injuries(home, SEASON)
-            injuries_away = scrape_injuries(away, SEASON)
+            players_home = PLAYERS_BY_TEAM.get(home, [])
+            players_away = PLAYERS_BY_TEAM.get(away, [])
+            injuries_home = annotate_injuries(INJURIES_BY_TEAM.get(home, []), players_home)
+            injuries_away = annotate_injuries(INJURIES_BY_TEAM.get(away, []), players_away)
             try:
                 prediction = predict_winner(
                     model, feature_cols, teams_df, home, away, home, games_df,
@@ -133,8 +154,11 @@ def index():
         notable_away=notable_away,
         adj_detail=adj_detail,
         stat_factors=stat_factors,
+        players_home=players_home,
+        players_away=players_away,
         selected_home=selected_home,
         selected_away=selected_away,
+        injuries_updated=INJURIES_UPDATED,
         error=error
     )
 
@@ -168,22 +192,23 @@ def historic():
             error = "Pick different season/team combinations."
         else:
             try:
-                # Load/train season-specific resources for only the teams in that season
-                model_a, fcols_a, gdf_a, tdf_a = get_season_resources(season_a, [team_a])
-                model_b, fcols_b, gdf_b, tdf_b = get_season_resources(season_b, [team_b])
+                # Each team's season stat row, then score with the current model.
+                _, stats_a = get_team_season_stats(season_a, team_a)
+                _, stats_b = get_team_season_stats(season_b, team_b)
+                # Distinct index labels so the same team in two seasons still works.
+                combined = pd.DataFrame([stats_a, stats_b], index=["TMA", "TMB"])
 
-                # Predict twice (neutral): Team A home in season A model, Team B home in season B model
+                # Predict both ways for a neutral court, then average.
                 pred_home = predict_winner(
-                    model_a, fcols_a, tdf_a, team_a, team_b, home_team=team_a, games_df=gdf_a,
-                    injuries_home=None, injuries_away=None
+                    model, feature_cols, combined, "TMA", "TMB", home_team="TMA",
+                    games_df=None, injuries_home=None, injuries_away=None,
+                )
+                pred_away = predict_winner(
+                    model, feature_cols, combined, "TMB", "TMA", home_team="TMB",
+                    games_df=None, injuries_home=None, injuries_away=None,
                 )
                 home_prob_a = float(pred_home.get("home_win_prob", 0))
-
-                pred_away_home = predict_winner(
-                    model_b, fcols_b, tdf_b, team_b, team_a, home_team=team_b, games_df=gdf_b,
-                    injuries_home=None, injuries_away=None
-                )
-                home_prob_b = float(pred_away_home.get("home_win_prob", 0))
+                home_prob_b = float(pred_away.get("home_win_prob", 0))
 
                 # Neutral combine: average probabilities
                 prob_a = (home_prob_a + (1 - home_prob_b)) / 2
@@ -221,4 +246,3 @@ def historic():
 
 if __name__ == "__main__":
     app.run(debug=True)
-    import os

@@ -6,8 +6,13 @@ import pickle
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, log_loss
+from sklearn.calibration import CalibratedClassifierCV
+try:
+    from sklearn.frozen import FrozenEstimator  # sklearn >= 1.6
+except ImportError:  # pragma: no cover
+    FrozenEstimator = None
 
 # Try to import XGBoost for better accuracy
 try:
@@ -48,7 +53,7 @@ STAT_FACTORS_CONFIG = [
 
 SEASON = 2026  # change to 2025 if needed
 MIN_SEASON = 2000  # for fallback search
-REQUEST_DELAY = 1.0  # seconds between requests to be polite
+REQUEST_DELAY = 2.5  # seconds between requests to avoid basketball-reference throttling
 NUM_SEASONS = 1  # Number of seasons to use for training (current + previous seasons)
 RECENT_FORM_WINDOW = 5  # Number of recent games to use for form calculation
 
@@ -59,6 +64,7 @@ MODEL_DIR = os.path.join(PARENT_DIR, "saved_models")
 MODEL_FILE = os.path.join(MODEL_DIR, "nba_predictor_model.pkl")
 DATA_CACHE_FILE = os.path.join(MODEL_DIR, "games_data_cache.pkl")
 TEAMS_CACHE_FILE = os.path.join(MODEL_DIR, "teams_data_cache.pkl")
+TRAINING_CACHE_FILE = os.path.join(MODEL_DIR, "training_games_cache.pkl")  # raw multi-season scrape
 
 
 def to_num(x):
@@ -469,139 +475,307 @@ def compute_team_aggregates(games_df):
     return teams
 
 
-def build_feature_matrix_and_train(games_df, teams_df):
-    rows = []
-    labels = []
-    for _, r in games_df.iterrows():
+ELO_BASE = 1500.0
+ELO_K = 20.0
+ELO_HOME_ADV = 100.0            # ~home-court edge in Elo points
+ELO_SEASON_REGRESS = 0.25       # fraction pulled back to the mean each new season
+
+
+def _elo_expected(home_elo, away_elo, home_adv=ELO_HOME_ADV):
+    """Elo win probability for the home team, including home-court advantage."""
+    return 1.0 / (1.0 + 10 ** (-((home_elo + home_adv) - away_elo) / 400.0))
+
+
+def compute_elo_and_rest(games_df):
+    """
+    One chronological pass that tags each game with its PRE-game Elo ratings and
+    each team's days of rest (point-in-time, so nothing leaks). Elo carries across
+    seasons with regression toward the mean; rest resets each season. Returns the
+    enriched dataframe and the final Elo per team (i.e. current strength).
+    """
+    df = games_df.sort_values("date").reset_index(drop=True).copy()
+    has_season = "season" in df.columns
+    elo = {}
+    last_date = {}
+    cur_season = None
+    cols = {k: [] for k in (
+        "home_elo_pre", "away_elo_pre", "home_rest", "away_rest", "home_b2b", "away_b2b"
+    )}
+
+    for _, r in df.iterrows():
+        if has_season and r["season"] != cur_season:
+            if cur_season is not None:  # regress toward mean at each new season
+                for t in elo:
+                    elo[t] = ELO_BASE + (elo[t] - ELO_BASE) * (1 - ELO_SEASON_REGRESS)
+            cur_season = r["season"]
+            last_date = {}  # rest doesn't carry over the offseason
+
+        h, a = r["home_team"], r["away_team"]
+        gd = r.get("date")
+        eh = elo.get(h, ELO_BASE)
+        ea = elo.get(a, ELO_BASE)
+        cols["home_elo_pre"].append(eh)
+        cols["away_elo_pre"].append(ea)
+
+        for team, side in ((h, "home"), (a, "away")):
+            ld = last_date.get(team)
+            if ld is None or gd is None or pd.isna(gd) or pd.isna(ld):
+                rest, b2b = 3, 0  # neutral default for a team's first game
+            else:
+                rest = (gd - ld).days
+                b2b = 1 if rest == 1 else 0
+            cols[side + "_rest"].append(rest)
+            cols[side + "_b2b"].append(b2b)
+
+        # Update ratings from the result (margin-aware, FiveThirtyEight style).
+        s_h = r.get("home_win")
+        if s_h is not None and not pd.isna(s_h):
+            exp_h = _elo_expected(eh, ea)
+            margin = abs(float(r.get("home_pts", 0)) - float(r.get("away_pts", 0)))
+            winner_diff = (eh + ELO_HOME_ADV - ea) if s_h == 1 else (ea - eh - ELO_HOME_ADV)
+            mult = np.log(margin + 1.0) * (2.2 / (winner_diff * 0.001 + 2.2)) if margin > 0 else 1.0
+            change = ELO_K * mult * (s_h - exp_h)
+            elo[h] = eh + change
+            elo[a] = ea - change
+        if gd is not None and not pd.isna(gd):
+            last_date[h] = gd
+            last_date[a] = gd
+
+    for k, v in cols.items():
+        df[k] = v
+    return df, elo
+
+
+def _elo_rest_extras(home_elo, away_elo, home_rest, away_rest, home_b2b, away_b2b):
+    """Turn raw Elo/rest values into the model's extra feature columns."""
+    hr = min(float(home_rest), 5.0)  # cap: 5+ days rest is all "well rested"
+    ar = min(float(away_rest), 5.0)
+    return {
+        "home_elo": (home_elo - ELO_BASE) / 100.0,
+        "away_elo": (away_elo - ELO_BASE) / 100.0,
+        "elo_diff": (home_elo - away_elo) / 100.0,
+        "elo_prob": _elo_expected(home_elo, away_elo),
+        "home_rest": hr,
+        "away_rest": ar,
+        "rest_diff": hr - ar,
+        "home_b2b": float(home_b2b),
+        "away_b2b": float(away_b2b),
+    }
+
+
+def build_feature_dict(hstats, astats, home_recent, away_recent, extras=None):
+    """
+    Build the model feature row from home/away aggregate stat Series and
+    recent-form dicts (or None). Shared by training and prediction so the two
+    code paths can never drift apart. `extras` (Elo/rest features) is merged in.
+    """
+    feat = {
+        # Basic scoring stats
+        "home_pts_for_avg": hstats["pts_for_avg"],
+        "home_pts_against_avg": hstats["pts_against_avg"],
+        "home_pt_diff": hstats["pt_diff"],
+        "away_pts_for_avg": astats["pts_for_avg"],
+        "away_pts_against_avg": astats["pts_against_avg"],
+        "away_pt_diff": astats["pt_diff"],
+        # Shooting percentages
+        "home_fg_pct": hstats["fg_pct_avg"],
+        "home_fg3_pct": hstats["fg3_pct_avg"],
+        "home_ft_pct": hstats["ft_pct_avg"],
+        "away_fg_pct": astats["fg_pct_avg"],
+        "away_fg3_pct": astats["fg3_pct_avg"],
+        "away_ft_pct": astats["ft_pct_avg"],
+        # Rebounding
+        "home_trb": hstats["trb_avg"],
+        "home_orb": hstats["orb_avg"],
+        "home_drb": hstats["drb_avg"],
+        "away_trb": astats["trb_avg"],
+        "away_orb": astats["orb_avg"],
+        "away_drb": astats["drb_avg"],
+        # Playmaking and defense
+        "home_ast": hstats["ast_avg"],
+        "home_stl": hstats["stl_avg"],
+        "home_blk": hstats["blk_avg"],
+        "home_tov": hstats["tov_avg"],
+        "away_ast": astats["ast_avg"],
+        "away_stl": astats["stl_avg"],
+        "away_blk": astats["blk_avg"],
+        "away_tov": astats["tov_avg"],
+        # Defensive metrics (opponent stats)
+        "home_opp_fg_pct": hstats["opp_fg_pct_avg"],
+        "home_opp_fg3_pct": hstats["opp_fg3_pct_avg"],
+        "home_opp_ast": hstats["opp_ast_avg"],
+        "home_opp_tov": hstats["opp_tov_avg"],
+        "away_opp_fg_pct": astats["opp_fg_pct_avg"],
+        "away_opp_fg3_pct": astats["opp_fg3_pct_avg"],
+        "away_opp_ast": astats["opp_ast_avg"],
+        "away_opp_tov": astats["opp_tov_avg"],
+        # Relative/differential features (often more predictive)
+        "pt_diff_diff": hstats["pt_diff"] - astats["pt_diff"],
+        "fg_pct_diff": hstats["fg_pct_avg"] - astats["fg_pct_avg"],
+        "fg3_pct_diff": hstats["fg3_pct_avg"] - astats["fg3_pct_avg"],
+        "trb_diff": hstats["trb_avg"] - astats["trb_avg"],
+        "ast_diff": hstats["ast_avg"] - astats["ast_avg"],
+        "stl_diff": hstats["stl_avg"] - astats["stl_avg"],
+        "blk_diff": hstats["blk_avg"] - astats["blk_avg"],
+        "tov_diff": astats["tov_avg"] - hstats["tov_avg"],  # Negative is good (fewer TOs)
+        "opp_fg_pct_diff": astats["opp_fg_pct_avg"] - hstats["opp_fg_pct_avg"],  # Lower opp FG% is better
+        # Recent form features (if available)
+        "home_recent_win_pct": home_recent["recent_win_pct"] if home_recent else 0.5,
+        "home_recent_pt_diff": home_recent["recent_pt_diff"] if home_recent else hstats["pt_diff"],
+        "away_recent_win_pct": away_recent["recent_win_pct"] if away_recent else 0.5,
+        "away_recent_pt_diff": away_recent["recent_pt_diff"] if away_recent else astats["pt_diff"],
+        "recent_form_diff": (home_recent["recent_win_pct"] if home_recent else 0.5) - (away_recent["recent_win_pct"] if away_recent else 0.5),
+        # Home court advantage
+        "home_flag": 1,
+    }
+    if extras:
+        feat.update(extras)
+    return feat
+
+
+def _build_season_features(season_df):
+    """
+    Build (rows, labels, dates) for a single season using point-in-time team
+    aggregates and recent form. Everything is scoped to this season so nothing
+    bleeds across the offseason.
+    """
+    season_df = season_df.sort_values("date").reset_index(drop=True)
+    aggregate_cache = {}  # cutoff date -> aggregate table (many games share a date)
+    rows, labels, dates = [], [], []
+
+    for _, r in season_df.iterrows():
         h = r["home_team"]
         a = r["away_team"]
         game_date = r.get("date")
-        
-        if h not in teams_df.index or a not in teams_df.index:
+
+        # Point-in-time features need a date to know what happened before the game
+        if game_date is None or pd.isna(game_date):
             continue
-        hstats = teams_df.loc[h]
-        astats = teams_df.loc[a]
-        
-        # Get recent form if date is available
-        home_recent = None
-        away_recent = None
-        if game_date is not None and pd.notna(game_date):
-            home_recent = compute_recent_form(games_df, h, game_date, RECENT_FORM_WINDOW)
-            away_recent = compute_recent_form(games_df, a, game_date, RECENT_FORM_WINDOW)
-        
-        feat = {
-            # Basic scoring stats
-            "home_pts_for_avg": hstats["pts_for_avg"],
-            "home_pts_against_avg": hstats["pts_against_avg"],
-            "home_pt_diff": hstats["pt_diff"],
-            "away_pts_for_avg": astats["pts_for_avg"],
-            "away_pts_against_avg": astats["pts_against_avg"],
-            "away_pt_diff": astats["pt_diff"],
-            # Shooting percentages
-            "home_fg_pct": hstats["fg_pct_avg"],
-            "home_fg3_pct": hstats["fg3_pct_avg"],
-            "home_ft_pct": hstats["ft_pct_avg"],
-            "away_fg_pct": astats["fg_pct_avg"],
-            "away_fg3_pct": astats["fg3_pct_avg"],
-            "away_ft_pct": astats["ft_pct_avg"],
-            # Rebounding
-            "home_trb": hstats["trb_avg"],
-            "home_orb": hstats["orb_avg"],
-            "home_drb": hstats["drb_avg"],
-            "away_trb": astats["trb_avg"],
-            "away_orb": astats["orb_avg"],
-            "away_drb": astats["drb_avg"],
-            # Playmaking and defense
-            "home_ast": hstats["ast_avg"],
-            "home_stl": hstats["stl_avg"],
-            "home_blk": hstats["blk_avg"],
-            "home_tov": hstats["tov_avg"],
-            "away_ast": astats["ast_avg"],
-            "away_stl": astats["stl_avg"],
-            "away_blk": astats["blk_avg"],
-            "away_tov": astats["tov_avg"],
-            # Defensive metrics (opponent stats)
-            "home_opp_fg_pct": hstats["opp_fg_pct_avg"],
-            "home_opp_fg3_pct": hstats["opp_fg3_pct_avg"],
-            "home_opp_ast": hstats["opp_ast_avg"],
-            "home_opp_tov": hstats["opp_tov_avg"],
-            "away_opp_fg_pct": astats["opp_fg_pct_avg"],
-            "away_opp_fg3_pct": astats["opp_fg3_pct_avg"],
-            "away_opp_ast": astats["opp_ast_avg"],
-            "away_opp_tov": astats["opp_tov_avg"],
-            # Relative/differential features (often more predictive)
-            "pt_diff_diff": hstats["pt_diff"] - astats["pt_diff"],
-            "fg_pct_diff": hstats["fg_pct_avg"] - astats["fg_pct_avg"],
-            "fg3_pct_diff": hstats["fg3_pct_avg"] - astats["fg3_pct_avg"],
-            "trb_diff": hstats["trb_avg"] - astats["trb_avg"],
-            "ast_diff": hstats["ast_avg"] - astats["ast_avg"],
-            "stl_diff": hstats["stl_avg"] - astats["stl_avg"],
-            "blk_diff": hstats["blk_avg"] - astats["blk_avg"],
-            "tov_diff": astats["tov_avg"] - hstats["tov_avg"],  # Negative is good (fewer TOs)
-            "opp_fg_pct_diff": astats["opp_fg_pct_avg"] - hstats["opp_fg_pct_avg"],  # Lower opp FG% is better
-            # Recent form features (if available)
-            "home_recent_win_pct": home_recent["recent_win_pct"] if home_recent else 0.5,
-            "home_recent_pt_diff": home_recent["recent_pt_diff"] if home_recent else hstats["pt_diff"],
-            "away_recent_win_pct": away_recent["recent_win_pct"] if away_recent else 0.5,
-            "away_recent_pt_diff": away_recent["recent_pt_diff"] if away_recent else astats["pt_diff"],
-            "recent_form_diff": (home_recent["recent_win_pct"] if home_recent else 0.5) - (away_recent["recent_win_pct"] if away_recent else 0.5),
-            # Home court advantage
-            "home_flag": 1
-        }
-        rows.append(feat)
+
+        if game_date not in aggregate_cache:
+            aggregate_cache[game_date] = compute_team_aggregates(
+                season_df[season_df["date"] < game_date]
+            )
+        prior_teams = aggregate_cache[game_date]
+
+        # Skip early-season games where a team has no prior data to learn from
+        if h not in prior_teams.index or a not in prior_teams.index:
+            continue
+
+        hstats = prior_teams.loc[h]
+        astats = prior_teams.loc[a]
+        home_recent = compute_recent_form(season_df, h, game_date, RECENT_FORM_WINDOW)
+        away_recent = compute_recent_form(season_df, a, game_date, RECENT_FORM_WINDOW)
+        extras = _elo_rest_extras(
+            r["home_elo_pre"], r["away_elo_pre"],
+            r["home_rest"], r["away_rest"], r["home_b2b"], r["away_b2b"],
+        )
+
+        rows.append(build_feature_dict(hstats, astats, home_recent, away_recent, extras))
         labels.append(r["home_win"])
+        dates.append(game_date)
+
+    return rows, labels, dates
+
+
+def build_feature_matrix_and_train(games_df):
+    # Ensure point-in-time Elo/rest columns exist (train_current_model precomputes
+    # them; other callers get them here).
+    if "home_elo_pre" not in games_df.columns:
+        games_df, _ = compute_elo_and_rest(games_df)
+
+    # Build features per season so point-in-time aggregates and recent form never
+    # leak each game's own result (or a prior season) into its features.
+    if "season" in games_df.columns:
+        groups = [g for _, g in games_df.groupby("season")]
+    else:
+        groups = [games_df]
+
+    rows, labels, dates = [], [], []
+    for g in groups:
+        r_, l_, d_ = _build_season_features(g)
+        rows += r_
+        labels += l_
+        dates += d_
 
     if not rows:
         raise ValueError("No training data available after filtering. Check scraped data.")
 
     X = pd.DataFrame(rows).fillna(0)
     y = pd.Series(labels)
-    
-    # Try stratified split, but fall back to regular split if it fails (e.g., too few samples)
-    try:
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, random_state=42, stratify=y)
-    except ValueError:
-        # If stratification fails (e.g., not enough samples in each class), use regular split
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, random_state=42)
-    
-    # Use XGBoost if available, otherwise fall back to Random Forest
+
+    # Chronological three-way split: fit on the oldest 70%, calibrate probabilities
+    # on the next 10%, evaluate on the most recent 20% (never touched in fitting).
+    # A random split would let the model "see the future" and overstate accuracy.
+    order = pd.Series(dates).sort_values(kind="mergesort").index
+    X = X.iloc[order].reset_index(drop=True)
+    y = y.iloc[order].reset_index(drop=True)
+    n = len(X)
+    train_end = max(1, int(n * 0.65))
+    calib_end = max(train_end + 1, int(n * 0.80))
+    X_train, y_train = X.iloc[:train_end], y.iloc[:train_end]
+    X_calib, y_calib = X.iloc[train_end:calib_end], y.iloc[train_end:calib_end]
+    X_test, y_test = X.iloc[calib_end:], y.iloc[calib_end:]
+
+    # Regularized (shallow, slow-learning) trees generalize better than the deep
+    # ones used before, which memorized the training set (train accuracy 1.0).
     if USE_XGBOOST:
-        model = xgb.XGBClassifier(
-            n_estimators=300,
-            max_depth=6,
-            learning_rate=0.1,
+        base = xgb.XGBClassifier(
+            n_estimators=250,
+            max_depth=4,
+            learning_rate=0.05,
             subsample=0.8,
             colsample_bytree=0.8,
-            min_child_weight=3,
+            min_child_weight=5,
             gamma=0.1,
+            reg_lambda=1.5,
+            reg_alpha=0.5,
             random_state=42,
             n_jobs=-1,
-            eval_metric='logloss'
+            eval_metric="logloss",
         )
     else:
-        model = RandomForestClassifier(
-            n_estimators=300,           # More trees for better accuracy
-            max_depth=15,               # Prevent overfitting
-            min_samples_split=10,       # More samples required to split
-            min_samples_leaf=5,         # More samples in leaf nodes
-            max_features='sqrt',        # Use sqrt of features (good default)
-            class_weight='balanced',    # Handle class imbalance
+        base = RandomForestClassifier(
+            n_estimators=400,
+            max_depth=6,
+            min_samples_split=20,
+            min_samples_leaf=10,
+            max_features="sqrt",
+            class_weight="balanced",
             random_state=42,
-            n_jobs=-1                   # Use all CPU cores
+            n_jobs=-1,
         )
-    
-    model.fit(X_train, y_train)
-    
-    # Evaluate model
-    train_preds = model.predict(X_train)
-    train_acc = accuracy_score(y_train, train_preds)
-    preds = model.predict(X_test)
-    test_acc = accuracy_score(y_test, preds)
-    
-    # Cross-validation for more robust accuracy estimate
-    cv_scores = cross_val_score(model, X, y, cv=5, scoring='accuracy', n_jobs=-1)
-    
-    return model, X.columns.tolist()
+
+    base.fit(X_train, y_train)
+
+    # Calibrate so the reported win probabilities are trustworthy (raw boosted
+    # trees are over-confident). Sigmoid (Platt) scaling is used rather than
+    # isotonic because our calibration slice is small (a few hundred games) and
+    # isotonic overfits it into hard 0%/100% outputs.
+    model = base
+    if FrozenEstimator is not None and len(X_calib) >= 50 and y_calib.nunique() > 1:
+        try:
+            model = CalibratedClassifierCV(FrozenEstimator(base), method="sigmoid")
+            model.fit(X_calib, y_calib)
+        except Exception:
+            model = base  # fall back to the uncalibrated model
+
+    # Evaluate on the untouched most-recent slice, against two baselines:
+    # "home team always wins" (accuracy) and "always predict the base rate" (log loss).
+    test_proba = model.predict_proba(X_test)[:, 1]
+    home_baseline = max(y_test.mean(), 1 - y_test.mean()) if len(y_test) else float("nan")
+    baseline_ll = log_loss(y_test, [y_train.mean()] * len(y_test)) if len(y_test) else None
+    metrics = {
+        "test_accuracy": round(accuracy_score(y_test, model.predict(X_test)), 4),
+        "home_baseline_accuracy": round(home_baseline, 4),
+        "test_log_loss": round(log_loss(y_test, test_proba), 4) if len(y_test) else None,
+        "baseline_log_loss": round(baseline_ll, 4) if baseline_ll is not None else None,
+        "n_train": int(len(X_train)),
+        "n_calib": int(len(X_calib)),
+        "n_test": int(len(X_test)),
+    }
+
+    return model, X.columns.tolist(), metrics
 
 #
 
@@ -610,7 +784,7 @@ def display_prediction_report(*args, **kwargs):
     return
 
 
-def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team, games_df=None, injuries_home=None, injuries_away=None):
+def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team, games_df=None, injuries_home=None, injuries_away=None, home_rest=2, away_rest=2):
     """
     Optionally accepts injuries_home and injuries_away (list of dicts with 'player', 'description').
     Auto-assigns importance: 3 if 'starter', 'star', 'all-star' in description, else 1.
@@ -668,85 +842,41 @@ def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team, games
             if pd.notna(prediction_date):
                 home_recent = compute_recent_form(games_df, home, prediction_date, RECENT_FORM_WINDOW)
                 away_recent = compute_recent_form(games_df, away, prediction_date, RECENT_FORM_WINDOW)
-    feat = {
-        # Basic scoring stats
-        "home_pts_for_avg": h["pts_for_avg"],
-        "home_pts_against_avg": h["pts_against_avg"],
-        "home_pt_diff": h["pt_diff"],
-        "away_pts_for_avg": a["pts_for_avg"],
-        "away_pts_against_avg": a["pts_against_avg"],
-        "away_pt_diff": a["pt_diff"],
-        # Shooting percentages
-        "home_fg_pct": h["fg_pct_avg"],
-        "home_fg3_pct": h["fg3_pct_avg"],
-        "home_ft_pct": h["ft_pct_avg"],
-        "away_fg_pct": a["fg_pct_avg"],
-        "away_fg3_pct": a["fg3_pct_avg"],
-        "away_ft_pct": a["ft_pct_avg"],
-        # Rebounding
-        "home_trb": h["trb_avg"],
-        "home_orb": h["orb_avg"],
-        "home_drb": h["drb_avg"],
-        "away_trb": a["trb_avg"],
-        "away_orb": a["orb_avg"],
-        "away_drb": a["drb_avg"],
-        # Playmaking and defense
-        "home_ast": h["ast_avg"],
-        "home_stl": h["stl_avg"],
-        "home_blk": h["blk_avg"],
-        "home_tov": h["tov_avg"],
-        "away_ast": a["ast_avg"],
-        "away_stl": a["stl_avg"],
-        "away_blk": a["blk_avg"],
-        "away_tov": a["tov_avg"],
-        # Defensive metrics (opponent stats)
-        "home_opp_fg_pct": h["opp_fg_pct_avg"],
-        "home_opp_fg3_pct": h["opp_fg3_pct_avg"],
-        "home_opp_ast": h["opp_ast_avg"],
-        "home_opp_tov": h["opp_tov_avg"],
-        "away_opp_fg_pct": a["opp_fg_pct_avg"],
-        "away_opp_fg3_pct": a["opp_fg3_pct_avg"],
-        "away_opp_ast": a["opp_ast_avg"],
-        "away_opp_tov": a["opp_tov_avg"],
-        # Relative/differential features (often more predictive)
-        "pt_diff_diff": h["pt_diff"] - a["pt_diff"],
-        "fg_pct_diff": h["fg_pct_avg"] - a["fg_pct_avg"],
-        "fg3_pct_diff": h["fg3_pct_avg"] - a["fg3_pct_avg"],
-        "trb_diff": h["trb_avg"] - a["trb_avg"],
-        "ast_diff": h["ast_avg"] - a["ast_avg"],
-        "stl_diff": h["stl_avg"] - a["stl_avg"],
-        "blk_diff": h["blk_avg"] - a["blk_avg"],
-        "tov_diff": a["tov_avg"] - h["tov_avg"],  # Negative is good (fewer TOs)
-        "opp_fg_pct_diff": a["opp_fg_pct_avg"] - h["opp_fg_pct_avg"],  # Lower opp FG% is better
-        # Recent form features (if available)
-        "home_recent_win_pct": home_recent["recent_win_pct"] if home_recent else 0.5,
-        "home_recent_pt_diff": home_recent["recent_pt_diff"] if home_recent else h["pt_diff"],
-        "away_recent_win_pct": away_recent["recent_win_pct"] if away_recent else 0.5,
-        "away_recent_pt_diff": away_recent["recent_pt_diff"] if away_recent else a["pt_diff"],
-        "recent_form_diff": (home_recent["recent_win_pct"] if home_recent else 0.5) - (away_recent["recent_win_pct"] if away_recent else 0.5),
-        # Home court advantage
-        "home_flag": 1
-    }
+    # Current Elo comes from teams_df (added at training time); rest is unknown for
+    # a hypothetical matchup, so assume both teams are equally rested (neutral).
+    home_elo = float(h.get("elo", ELO_BASE)) if hasattr(h, "get") else ELO_BASE
+    away_elo = float(a.get("elo", ELO_BASE)) if hasattr(a, "get") else ELO_BASE
+    extras = _elo_rest_extras(home_elo, away_elo, home_rest, away_rest, 0, 0)
+    feat = build_feature_dict(h, a, home_recent, away_recent, extras)
     # Ensure all required features are present (handle old models with fewer features)
     feat_dict = {col: feat.get(col, 0) for col in feature_cols}
     X_row = pd.DataFrame([feat_dict])[feature_cols].fillna(0)
     prob_home = model.predict_proba(X_row)[0][1]
+    # Guardrail: never show absolute certainty for a single game.
+    prob_home = min(0.97, max(0.03, float(prob_home)))
     prob_away = 1 - prob_home
     # --- Injury adjustment logic ---
     total_importance_home = 0
     total_importance_away = 0
     injury_note_home = []
     injury_note_away = []
+    def _importance(inj):
+        # Prefer the player's real impact tier (from Win Shares) when we have it;
+        # fall back to the old keyword heuristic when the player isn't a key player.
+        tier = inj.get("impact_tier")
+        if tier:
+            return int(tier)
+        desc = (inj.get("description") or "").lower()
+        return 3 if any(word in desc for word in ["star", "starter", "all-star"]) else 1
+
     if injuries_home:
         for inj in injuries_home:
-            desc = (inj.get("description") or "").lower()
-            importance = 3 if any(word in desc for word in ["star", "starter", "all-star"]) else 1
+            importance = _importance(inj)
             total_importance_home += importance
             injury_note_home.append(f"{inj.get('player', '')} (level {importance})")
     if injuries_away:
         for inj in injuries_away:
-            desc = (inj.get("description") or "").lower()
-            importance = 3 if any(word in desc for word in ["star", "starter", "all-star"]) else 1
+            importance = _importance(inj)
             total_importance_away += importance
             injury_note_away.append(f"{inj.get('player', '')} (level {importance})")
     # Each importance point = 2% (0.02) win prob, capped to [0,1].
@@ -788,6 +918,80 @@ def build_stat_factors(home_label, away_label, home_stats, away_stats, top_n=6):
     return factors[:top_n]
 
 
+def compute_team_season_stats(team_br_abbr, season):
+    """
+    Scrape one team's gamelog for a season and return its aggregate stat row as a
+    plain dict (for the historic predictor). Returns None if no data. The trained
+    model is a general stats->win function, so historic matchups only need each
+    team's season stats, not a per-season model.
+    """
+    games = build_games_dataframe([team_br_abbr], season)
+    if games is None or games.empty:
+        return None
+    tdf = compute_team_aggregates(games)
+    if team_br_abbr not in tdf.index:
+        return None
+    return {k: float(v) for k, v in tdf.loc[team_br_abbr].items()}
+
+
+def train_current_model(teams=None, seasons=None, use_cached_scrape=False):
+    """
+    Scrape several recent complete seasons, train one model on all of them (more
+    data = a more stable P(win) function), then persist it alongside the LATEST
+    season's aggregates/games so predictions reflect current team strength.
+    Returns the evaluation metrics dict.
+
+    If use_cached_scrape is True and a prior scrape exists on disk, reuse it
+    instead of hitting the network (handy for retuning the model quickly).
+    """
+    if teams is None:
+        teams = TEAMS_ALL
+    if seasons is None:
+        seasons = [SEASON - 2, SEASON - 1, SEASON]
+
+    frames = []
+    if use_cached_scrape and os.path.exists(TRAINING_CACHE_FILE):
+        with open(TRAINING_CACHE_FILE, "rb") as f:
+            all_games = pickle.load(f)
+        print(f"  reusing cached scrape: {len(all_games)} games")
+    else:
+        # Scrape most-recent season first so throttling later still leaves us the
+        # season that matters most for current predictions.
+        for s in sorted(seasons, reverse=True):
+            df = build_games_dataframe(teams, s)
+            if df is not None and not df.empty:
+                df = df.copy()
+                df["season"] = s
+                frames.append(df)
+                print(f"  season {s}: {len(df)} games")
+            else:
+                print(f"  season {s}: no data")
+
+        if not frames:
+            raise RuntimeError("No games scraped for any requested season.")
+
+        all_games = pd.concat(frames, ignore_index=True)
+        with open(TRAINING_CACHE_FILE, "wb") as f:  # save raw scrape for fast retuning
+            pickle.dump(all_games, f)
+
+    # Compute Elo/rest once (with cross-season carryover) and keep the final Elo.
+    all_games, final_elo = compute_elo_and_rest(all_games)
+    model, feature_cols, metrics = build_feature_matrix_and_train(all_games)
+
+    # Serve using the most recent season only, so team aggregates and recent-form
+    # lookups reflect current strength rather than a multi-year blend.
+    latest = int(all_games["season"].max())
+    serve_games = all_games[all_games["season"] == latest].reset_index(drop=True)
+    serve_teams = compute_team_aggregates(serve_games)
+    # Attach each team's current Elo so predict_winner can use it at inference.
+    serve_teams["elo"] = pd.Series(final_elo).reindex(serve_teams.index).fillna(ELO_BASE)
+    save_model_and_data(model, feature_cols, serve_games, serve_teams, latest)
+
+    metrics["seasons_trained"] = sorted(int(s) for s in all_games["season"].unique())
+    metrics["latest_season"] = latest
+    return metrics
+
+
 def main(teams=None, season=SEASON, force_retrain=False):
     # Use all teams by default for more training data
     if teams is None:
@@ -799,6 +1003,7 @@ def main(teams=None, season=SEASON, force_retrain=False):
     games_df = None
     teams_df = None
     existing_games_df = None
+    metrics = None
     
     if not force_retrain:
         model, feature_cols, games_df, teams_df, saved_season = load_model_and_data()
@@ -847,14 +1052,16 @@ def main(teams=None, season=SEASON, force_retrain=False):
         
         if needs_retrain:
             teams_df = compute_team_aggregates(games_df)
-            model, feature_cols = build_feature_matrix_and_train(games_df, teams_df)
-            
+            model, feature_cols, metrics = build_feature_matrix_and_train(games_df)
+
             # Save the newly trained model with accumulated data
             save_model_and_data(model, feature_cols, games_df, teams_df, season)
         else:
             # Use existing model but update teams_df with latest aggregates
             teams_df = compute_team_aggregates(games_df)
-    return {"games_df": games_df, "teams_df": teams_df, "model": model, "feature_cols": feature_cols}
+    return {"games_df": games_df, "teams_df": teams_df, "model": model, "feature_cols": feature_cols, "metrics": metrics}
 
 if __name__ == "__main__":
     out = main()
+    if out and out.get("metrics"):
+        print("Training metrics:", out["metrics"])
