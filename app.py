@@ -1,3 +1,5 @@
+import os
+
 import pandas as pd
 from flask import Flask, render_template, request
 from nbaPredictor import load_model_and_data, predict_winner, compute_team_season_stats
@@ -245,4 +247,7 @@ def historic():
     )
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    # Debugger is off by default; enable locally with FLASK_DEBUG=1. Never enable
+    # it on a reachable host — the Werkzeug debugger allows remote code execution.
+    debug = os.environ.get("FLASK_DEBUG") == "1"
+    app.run(debug=debug)

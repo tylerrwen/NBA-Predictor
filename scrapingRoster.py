@@ -4,7 +4,10 @@ from bs4 import BeautifulSoup, Comment
 def scrape_injuries(team: str, season: int):
     url = f"https://www.basketball-reference.com/teams/{team}/{season}.html"
 
-    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+    except requests.exceptions.RequestException:
+        return []
     if r.status_code != 200:
         return []
 

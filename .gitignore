@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Trained models / data caches (regenerate with build_cache.py)
+saved_models/*.pkl
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store

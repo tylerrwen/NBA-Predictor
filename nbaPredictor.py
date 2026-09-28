@@ -77,12 +77,12 @@ def to_num(x):
         return np.nan
     try:
         return float(s.replace(",", ""))
-    except:
+    except ValueError:
         # fallback: keep digits, dot, minus
         cleaned = "".join(ch for ch in s if (ch.isdigit() or ch in ".-"))
         try:
             return float(cleaned) if cleaned not in ("", ".", "-") else np.nan
-        except:
+        except ValueError:
             return np.nan
 
 
@@ -161,7 +161,7 @@ def merge_games_data(existing_df, new_df):
         if 'date' in df.columns:
             try:
                 df['date'] = pd.to_datetime(df['date'])
-            except:
+            except (ValueError, TypeError):
                 pass
     
     # Combine the dataframes
@@ -327,7 +327,7 @@ def build_games_dataframe(teams, season):
     # parse date if possible
     try:
         df["date"] = pd.to_datetime(df["date"])
-    except:
+    except (ValueError, TypeError):
         pass
     df["home_win"] = (df["home_pts"] > df["away_pts"]).astype(int)
     df = df.drop_duplicates(subset=["date","home_team","away_team"]).reset_index(drop=True)
