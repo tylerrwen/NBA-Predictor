@@ -51,6 +51,10 @@ STAT_FACTORS_CONFIG = [
 REQUEST_DELAY = 2.5  # seconds between requests to avoid basketball-reference throttling
 NUM_SEASONS = 1  # Number of seasons to use for training (current + previous seasons)
 RECENT_FORM_WINDOW = 5  # Number of recent games to use for form calculation
+# Log-odds shift applied per injury importance point. 0.08 gives ~2% win-prob
+# swing near an even matchup (matching the original design), but tapers correctly
+# when a game is already lopsided instead of distorting the calibrated output.
+INJURY_LOGIT_PER_POINT = 0.08
 
 # Model persistence paths (saved in NBAPredictor/saved_models folder)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -830,15 +834,20 @@ def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team, games
             importance = _importance(inj)
             total_importance_away += importance
             injury_note_away.append(f"{inj.get('player', '')} (level {importance})")
-    # Each importance point = 2% (0.02) win prob, capped to [0,1].
-    adjustment = 0.02
-    prob_home_adj = prob_home - (total_importance_home * adjustment) + (total_importance_away * adjustment)
-    prob_home_adj = max(0.0, min(1.0, prob_home_adj))
+    # Fold injuries into the calibrated probability in LOG-ODDS space rather than
+    # raw probability space. A flat +/- in probability distorts a calibrated
+    # output near the extremes and can blow past the guardrail; a log-odds shift
+    # composes correctly. Away injuries help the home team and vice versa.
+    logit = np.log(prob_home / (1.0 - prob_home))
+    logit += (total_importance_away - total_importance_home) * INJURY_LOGIT_PER_POINT
+    prob_home_adj = 1.0 / (1.0 + np.exp(-logit))
+    # Same "never absolute certainty for a single game" guardrail as the raw prob.
+    prob_home_adj = float(min(0.97, max(0.03, prob_home_adj)))
     prob_away_adj = 1 - prob_home_adj
     predicted = home if prob_home_adj >= 0.5 else away
     stat_factors = build_stat_factors(home, away, h, a)
     return {"home_team": home, "away_team": away, "home_win_prob": round(prob_home_adj,3), "away_win_prob": round(prob_away_adj,3), "predicted_winner": predicted,
-            "injuries_home": injury_note_home, "injuries_away": injury_note_away, "adjustment_detail": { "raw_model_prob_home": round(prob_home,3), "raw_model_prob_away": round(prob_away,3), "inj_importance_home": total_importance_home, "inj_importance_away": total_importance_away, "adj_delta_percent": (total_importance_away - total_importance_home)*adjustment*100 },
+            "injuries_home": injury_note_home, "injuries_away": injury_note_away, "adjustment_detail": { "raw_model_prob_home": round(prob_home,3), "raw_model_prob_away": round(prob_away,3), "inj_importance_home": total_importance_home, "inj_importance_away": total_importance_away, "adj_delta_percent": round((prob_home_adj - prob_home) * 100, 1) },
             "stat_factors": stat_factors}
 
 

@@ -185,3 +185,44 @@ def test_merge_games_data_handles_empty_existing():
 ])
 def test_tier_thresholds(ws, mpg, expected):
     assert _tier(ws, mpg) == expected
+
+
+# --- injury adjustment (log-odds space) -----------------------------------
+# These exercise the real trained model/data on disk; skipped if absent.
+
+@pytest.fixture(scope="module")
+def loaded_model():
+    model, feature_cols, games_df, teams_df, _ = nba.load_model_and_data()
+    if model is None or teams_df is None or len(teams_df.index) < 2:
+        pytest.skip("no trained model/data on disk")
+    return model, feature_cols, games_df, teams_df
+
+
+def _predict(loaded, home, away, **kw):
+    model, feature_cols, games_df, teams_df = loaded
+    return nba.predict_winner(model, feature_cols, teams_df, home, away,
+                              home_team=home, games_df=games_df, **kw)
+
+
+def test_no_injuries_means_zero_adjustment(loaded_model):
+    a, b = list(loaded_model[3].index)[:2]
+    res = _predict(loaded_model, a, b)
+    assert res["adjustment_detail"]["adj_delta_percent"] == 0.0
+    # adjusted prob equals the raw model prob when nothing is injured
+    assert res["home_win_prob"] == pytest.approx(res["adjustment_detail"]["raw_model_prob_home"], abs=1e-3)
+
+
+def test_home_injury_lowers_home_prob_away_injury_raises_it(loaded_model):
+    a, b = list(loaded_model[3].index)[:2]
+    base = _predict(loaded_model, a, b)["home_win_prob"]
+    hurt_home = _predict(loaded_model, a, b, injuries_home=[{"player": "X", "impact_tier": 3}])["home_win_prob"]
+    hurt_away = _predict(loaded_model, a, b, injuries_away=[{"player": "Y", "impact_tier": 3}])["home_win_prob"]
+    assert hurt_home < base < hurt_away
+
+
+def test_injury_adjustment_respects_guardrail(loaded_model):
+    a, b = list(loaded_model[3].index)[:2]
+    many = [{"player": f"P{i}", "impact_tier": 3} for i in range(30)]
+    res = _predict(loaded_model, a, b, injuries_home=many)
+    # Even a flood of injuries can't push past the "never absolute certainty" bounds.
+    assert 0.03 <= res["home_win_prob"] <= 0.97
