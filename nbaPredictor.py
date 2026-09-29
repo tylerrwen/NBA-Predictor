@@ -24,11 +24,9 @@ except ImportError:
 # import scrapers from your modules (must exist in same folder)
 from scrapingStats import scrapingStats
 
-TEAMS_ALL = [
-    "ATL","BOS","BRK","CHO","CHI","CLE","DAL","DEN","DET","GSW",
-    "HOU","IND","LAC","LAL","MEM","MIA","MIL","MIN","NOP","NYK",
-    "OKC","ORL","PHI","PHO","POR","SAC","SAS","TOR","UTA","WAS"
-]
+# Season/team constants live in config.py so app.py, build_cache.py, and this
+# module can never drift out of sync.
+from config import SEASON, BR_TEAMS as TEAMS_ALL
 
 # Team name mapping for common abbreviations (scraped data may use different abbreviations)
 TEAM_NAME_MAP = {
@@ -50,8 +48,6 @@ STAT_FACTORS_CONFIG = [
     {"key": "opp_fg_pct_avg", "label": "Opponent FG %", "better": "lower", "decimals": 1, "multiplier": 100},
 ]
 
-SEASON = 2026  # change to 2025 if needed
-MIN_SEASON = 2000  # for fallback search
 REQUEST_DELAY = 2.5  # seconds between requests to avoid basketball-reference throttling
 NUM_SEASONS = 1  # Number of seasons to use for training (current + previous seasons)
 RECENT_FORM_WINDOW = 5  # Number of recent games to use for form calculation

@@ -13,19 +13,11 @@ Examples:
 import argparse
 import time
 
-from nbaPredictor import train_current_model, compute_team_season_stats, SEASON
+from nbaPredictor import train_current_model, compute_team_season_stats
 from scrapingRoster import scrape_injuries
 from scrapingPlayers import scrape_key_players
 from caches import save_injuries, save_players, save_team_season
-
-# UI abbreviations (must match app.TEAMS) -> basketball-reference abbreviations
-BR_ABBR_MAP = {"BKN": "BRK", "PHX": "PHO"}
-
-APP_TEAMS = [
-    "ATL", "BOS", "BKN", "CHO", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
-    "HOU", "IND", "LAC", "LAL", "MEM", "MIA", "MIL", "MIN", "NOP", "NYK",
-    "OKC", "ORL", "PHI", "PHX", "POR", "SAC", "SAS", "TOR", "UTA", "WAS",
-]
+from config import SEASON, UI_TEAMS as APP_TEAMS, BR_ABBR_MAP
 
 
 def build_current_model(seasons=None):

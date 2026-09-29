@@ -4,18 +4,9 @@ import pandas as pd
 from flask import Flask, render_template, request
 from nbaPredictor import load_model_and_data, predict_winner, compute_team_season_stats
 from caches import load_injuries, load_players, load_team_season, save_team_season
-
-# basketball-reference uses different gamelog abbreviations for a few teams.
-BR_ABBR_MAP = {"BKN": "BRK", "PHX": "PHO"}
+from config import SEASON, UI_TEAMS as TEAMS, BR_ABBR_MAP
 
 app = Flask(__name__)
-
-TEAMS = [
-    "ATL", "BOS", "BKN", "CHO", "CHI", "CLE", "DAL", "DEN",
-    "DET", "GSW", "HOU", "IND", "LAC", "LAL", "MEM", "MIA",
-    "MIL", "MIN", "NOP", "NYK", "OKC", "ORL", "PHI", "PHX",
-    "POR", "SAC", "SAS", "TOR", "UTA", "WAS"
-]
 
 TEAM_NAME_MAP = {
     "ATL": "Atlanta Hawks",
@@ -52,8 +43,7 @@ TEAM_NAME_MAP = {
 
 TEAM_OPTIONS = [{"abbr": abbr, "name": TEAM_NAME_MAP.get(abbr, abbr)} for abbr in TEAMS]
 
-SEASON = 2026
-SEASONS = list(range(2000, SEASON + 1))[::-1]  # 2026 down to 2000
+SEASONS = list(range(2000, SEASON + 1))[::-1]  # current season down to 2000
 HISTORIC_SEASONS = [s for s in SEASONS if s < SEASON]  # remove current 2025-2026 from historic options
 
 model, feature_cols, games_df, teams_df, _ = load_model_and_data()
