@@ -32,8 +32,10 @@ This project was built using the following Python libraries:
    ```
 3. Install the dependencies:
    ```bash
-   pip install flask beautifulsoup4 scikit-learn numpy pandas
+   pip install -r requirements.txt
    ```
+   (scikit-learn 1.6+ is required for probability calibration; `xgboost` is
+   optional and the model falls back to a RandomForest if it isn't installed.)
 
 ### Build the data caches
 All scraping happens offline. `build_cache.py` is the only script that touches

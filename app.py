@@ -65,11 +65,13 @@ PLAYERS_BY_TEAM, PLAYERS_SEASON, PLAYERS_UPDATED = load_players()
 
 def annotate_injuries(injuries, players):
     """Tag each injured player with their impact tier (from the key-player cache)
-    so the prediction weights a star's absence more than a benchwarmer's."""
+    so the prediction weights a star's absence more than a benchwarmer's.
+    Returns fresh dicts so the shared module-level injury cache is never mutated."""
     tier_by_name = {p.get("player"): p.get("tier") for p in players}
-    for inj in injuries:
-        inj["impact_tier"] = tier_by_name.get(inj.get("player"))
-    return injuries
+    return [
+        {**inj, "impact_tier": tier_by_name.get(inj.get("player"))}
+        for inj in injuries
+    ]
 
 _TEAM_SEASON_MEM = {}  # (season, br_abbr) -> stats dict, in-process cache
 

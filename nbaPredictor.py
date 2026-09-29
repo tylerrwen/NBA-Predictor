@@ -23,7 +23,6 @@ except ImportError:
 
 # import scrapers from your modules (must exist in same folder)
 from scrapingStats import scrapingStats
-from scrapingStandings import get_team_standing
 
 TEAMS_ALL = [
     "ATL","BOS","BRK","CHO","CHI","CLE","DAL","DEN","DET","GSW",
@@ -132,19 +131,6 @@ def load_model_and_data():
         return None, None, None, None, None
 
 
-def load_existing_games_data():
-    """Load existing games data from cache if it exists. Returns games_df or None."""
-    if not os.path.exists(DATA_CACHE_FILE):
-        return None
-    
-    try:
-        with open(DATA_CACHE_FILE, "rb") as f:
-            games_df = pickle.load(f)
-        return games_df
-    except Exception:
-        return None
-
-
 def merge_games_data(existing_df, new_df):
     """
     Merge new games with existing games, avoiding duplicates.
@@ -175,22 +161,6 @@ def merge_games_data(existing_df, new_df):
     ).sort_values('date', ascending=True).reset_index(drop=True)
     
     return combined
-
-
-def find_working_season(team, start_season, min_season=MIN_SEASON):
-    """
-    Try start_season down to min_season until scrapingStats returns non-empty list.
-    Returns the first season that yields gamelogs (or None).
-    """
-    for s in range(start_season, min_season - 1, -1):
-        time.sleep(REQUEST_DELAY)
-        try:
-            games = scrapingStats(team, s)
-        except Exception:
-            games = []
-        if games:
-            return s
-    return None
 
 
 def build_games_dataframe(teams, season):
@@ -332,15 +302,6 @@ def build_games_dataframe(teams, season):
     df["home_win"] = (df["home_pts"] > df["away_pts"]).astype(int)
     df = df.drop_duplicates(subset=["date","home_team","away_team"]).reset_index(drop=True)
     return df
-
-
-def build_multi_season_dataframe(teams, start_season, num_seasons=NUM_SEASONS):
-    """Build dataframe from single season using scrapingStats.py directly."""
-    # Just use the current season - scrapingStats.py works for all teams
-    games_df = build_games_dataframe(teams, start_season)
-    if not games_df.empty:
-        games_df['season'] = start_season
-    return games_df
 
 
 def compute_recent_form(games_df, team, game_date, window=RECENT_FORM_WINDOW):
@@ -777,12 +738,6 @@ def build_feature_matrix_and_train(games_df):
 
     return model, X.columns.tolist(), metrics
 
-#
-
-def display_prediction_report(*args, **kwargs):
-    """Previously used for console output; now intentionally silent."""
-    return
-
 
 def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team, games_df=None, injuries_home=None, injuries_away=None, home_rest=2, away_rest=2):
     """
@@ -885,7 +840,6 @@ def predict_winner(model, feature_cols, teams_df, teamA, teamB, home_team, games
     prob_home_adj = max(0.0, min(1.0, prob_home_adj))
     prob_away_adj = 1 - prob_home_adj
     predicted = home if prob_home_adj >= 0.5 else away
-    display_prediction_report(home, away, prob_home_adj, prob_away_adj, predicted, dict(h), dict(a), injury_note_home, injury_note_away)
     stat_factors = build_stat_factors(home, away, h, a)
     return {"home_team": home, "away_team": away, "home_win_prob": round(prob_home_adj,3), "away_win_prob": round(prob_away_adj,3), "predicted_winner": predicted,
             "injuries_home": injury_note_home, "injuries_away": injury_note_away, "adjustment_detail": { "raw_model_prob_home": round(prob_home,3), "raw_model_prob_away": round(prob_away,3), "inj_importance_home": total_importance_home, "inj_importance_away": total_importance_away, "adj_delta_percent": (total_importance_away - total_importance_home)*adjustment*100 },
